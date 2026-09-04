@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: betman-soccer
+    runtime: docker
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHONUNBUFFERED
+        value: "1"

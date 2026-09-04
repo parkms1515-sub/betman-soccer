@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+.env.*
+.pytest_cache/
+.idea/
+.vscode/
+_debug*
+_h2h*
+_probe*
+_keys.json
+*.log
