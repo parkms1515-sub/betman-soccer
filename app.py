@@ -119,13 +119,14 @@ HTML_TEMPLATE = """
             margin-top: 4px;
         }
 
+        .filter-wrap { margin: 20px 0 16px; }
         .filter-bar {
             display: flex;
             gap: 8px;
-            margin: 20px 0 16px;
             flex-wrap: wrap;
             align-items: center;
         }
+        .filter-bar.league-bar { margin-top: 8px; }
 
         .filter-btn {
             padding: 8px 16px;
@@ -193,6 +194,7 @@ HTML_TEMPLATE = """
         tbody tr:hover { background: rgba(0, 210, 255, 0.04); }
         tbody tr.h2h-hot { background: rgba(255, 171, 64, 0.05); }
         tbody tr.pts-hot { background: rgba(255, 82, 82, 0.06); }
+        tbody tr.form5-hot { background: rgba(129, 199, 132, 0.06); }
 
         td {
             padding: 12px;
@@ -384,6 +386,7 @@ HTML_TEMPLATE = """
         }
         .match-card.h2h-hot { border-color: rgba(255, 171, 64, 0.35); }
         .match-card.pts-hot { border-color: rgba(255, 82, 82, 0.4); }
+        .match-card.form5-hot { border-color: rgba(129, 199, 132, 0.4); }
         .card-top {
             display: flex;
             align-items: center;
@@ -428,14 +431,14 @@ HTML_TEMPLATE = """
             .stat-card { padding: 10px 6px; }
             .stat-card .number { font-size: 1.15rem; }
             .stat-card .desc { font-size: 0.68rem; }
-            .filter-bar {
+            .filter-bar.league-bar {
                 flex-wrap: nowrap;
                 overflow-x: auto;
                 -webkit-overflow-scrolling: touch;
                 padding-bottom: 6px;
             }
             .filter-btn { flex: 0 0 auto; min-height: 36px; }
-            .refresh-btn { position: sticky; right: 0; }
+            .refresh-btn { margin-left: auto; }
             .table-wrapper { display: none; }
             .card-list { display: flex; flex-direction: column; gap: 10px; }
             .refresh-notice { font-size: 0.75rem; line-height: 1.5; }
@@ -478,11 +481,21 @@ HTML_TEMPLATE = """
                 <div class="number" id="ptsOutlierCount">-</div>
                 <div class="desc">승점차이 이탈</div>
             </div>
+            <div class="stat-card">
+                <div class="number" id="form5Count">-</div>
+                <div class="desc">최근5 9점+</div>
+            </div>
         </div>
 
-        <div class="filter-bar" id="filterBar">
-            <button class="filter-btn active" data-league="all">전체</button>
-            <button class="filter-btn refresh-btn" id="refreshBtn">새로고침</button>
+        <div class="filter-wrap" id="filterWrap">
+            <div class="filter-bar" id="filterBar">
+                <button class="filter-btn active" data-league="all">전체</button>
+                <button class="filter-btn" data-league="streak">3연승+</button>
+                <button class="filter-btn" data-league="pts">승점차이</button>
+                <button class="filter-btn" data-league="form5">승점9점</button>
+                <button class="filter-btn refresh-btn" id="refreshBtn">새로고침</button>
+            </div>
+            <div class="filter-bar league-bar" id="leagueBar"></div>
         </div>
 
         <div class="table-wrapper">
@@ -500,12 +513,13 @@ HTML_TEMPLATE = """
                         <th>기대확률</th>
                         <th>분석</th>
                         <th>승점차</th>
+                        <th>최근5</th>
                         <th>상대전적</th>
                     </tr>
                 </thead>
                 <tbody id="matchBody">
                     <tr>
-                        <td colspan="12">
+                        <td colspan="13">
                             <div class="loading">
                                 <div class="spinner"></div>
                                 <div>FotMob에서 축구 배당을 가져오는 중입니다. 첫 수집은 조금 더 걸릴 수 있습니다.</div>
@@ -519,7 +533,7 @@ HTML_TEMPLATE = """
         <div class="card-list" id="matchCards"></div>
 
         <div class="refresh-notice">
-            배당·승점·순위는 FotMob 참고 값입니다. 승점차이는 이번에 올라온 경기에서 같은 승점차의 평균 배당과 비교해, 편차가 ±로 큰 경기만 보여 줍니다.
+            배당·승점·순위는 FotMob 참고 값입니다. 승점차이는 이번에 올라온 경기에서 같은 승점차의 평균 배당과 비교해, 편차가 ±로 큰 경기만 보여 줍니다. 승점9점은 리그 최근 5경기 승점이 9점 이상인 팀입니다. 컵·친선은 넣지 않습니다.
         </div>
     </div>
 
@@ -640,6 +654,30 @@ HTML_TEMPLATE = """
                 signal;
         }
 
+        function form5Cell(m) {
+            const parts = [];
+            const add = (side, pts, form, hotClass) => {
+                if (pts == null && !form) return;
+                const hot = Number(pts) >= 9;
+                if (hot) {
+                    parts.push(`<span class="h2h-streak ${hotClass}">✓ ${side} ${pts}점</span>`);
+                } else if (pts != null) {
+                    parts.push(`<span class="h2h-none">${side} ${pts}점</span>`);
+                }
+                if (form) parts.push(`<div class="h2h-form">${escapeHtml(form)}</div>`);
+            };
+            add('홈', m.form5_home_pts, m.form5_home, 'h2h-home');
+            add('원정', m.form5_away_pts, m.form5_away, 'h2h-away');
+            return parts.join('') || '<span class="h2h-none">-</span>';
+        }
+
+        function rowHotClass(m) {
+            if (m.pts_outlier) return 'pts-hot';
+            if (m.form5_checked) return 'form5-hot';
+            if (m.h2h_checked) return 'h2h-hot';
+            return '';
+        }
+
         function h2hCell(m) {
             const form = m.h2h_form
                 ? `<div class="h2h-form">${escapeHtml(m.h2h_form)}</div>`
@@ -672,35 +710,22 @@ HTML_TEMPLATE = """
         }
 
         function renderFilters(leagues) {
-            const bar = document.getElementById('filterBar');
-            const refresh = document.getElementById('refreshBtn');
-            bar.querySelectorAll('.filter-btn:not(.refresh-btn)').forEach(btn => btn.remove());
-            const allBtn = document.createElement('button');
-            allBtn.className = 'filter-btn' + (currentLeague === 'all' ? ' active' : '');
-            allBtn.dataset.league = 'all';
-            allBtn.textContent = '전체';
-            bar.insertBefore(allBtn, refresh);
-            const streakBtn = document.createElement('button');
-            streakBtn.className = 'filter-btn' + (currentLeague === 'streak' ? ' active' : '');
-            streakBtn.dataset.league = 'streak';
-            streakBtn.textContent = '3연승+';
-            bar.insertBefore(streakBtn, refresh);
-            const ptsBtn = document.createElement('button');
-            ptsBtn.className = 'filter-btn' + (currentLeague === 'pts' ? ' active' : '');
-            ptsBtn.dataset.league = 'pts';
-            ptsBtn.textContent = '승점차이';
-            bar.insertBefore(ptsBtn, refresh);
-            leagues.forEach(league => {
+            document.querySelectorAll('#filterBar .filter-btn:not(.refresh-btn)').forEach(btn => {
+                btn.classList.toggle('active', btn.dataset.league === currentLeague);
+            });
+            const bar = document.getElementById('leagueBar');
+            bar.innerHTML = '';
+            (leagues || []).forEach(league => {
                 const btn = document.createElement('button');
                 btn.className = 'filter-btn' + (currentLeague === league ? ' active' : '');
                 btn.dataset.league = league;
                 btn.textContent = league;
-                bar.insertBefore(btn, refresh);
+                bar.appendChild(btn);
             });
         }
 
         function matchCard(m) {
-            const hot = m.pts_outlier ? 'pts-hot' : (m.h2h_checked ? 'h2h-hot' : '');
+            const hot = rowHotClass(m);
             return `
                 <article class="match-card ${hot}">
                     <div class="card-top">
@@ -725,6 +750,7 @@ HTML_TEMPLATE = """
                     <div class="card-meta">
                         <span class="fav-badge ${favClass(m.fav_side)}">${escapeHtml(m.fav_team)}</span>
                         ${ptsCell(m)}
+                        ${form5Cell(m)}
                         ${h2hCell(m)}
                     </div>
                     <div class="vote-text">승${m.w_pct}% 무${m.d_pct}% 패${m.l_pct}%</div>
@@ -738,8 +764,32 @@ HTML_TEMPLATE = """
 
         function setStatus(html) {
             document.getElementById('matchBody').innerHTML =
-                `<tr><td colspan="12">${html}</td></tr>`;
+                `<tr><td colspan="13">${html}</td></tr>`;
             document.getElementById('matchCards').innerHTML = html;
+        }
+
+        function kickoffMs(m) {
+            if (m && m.kickoff) {
+                const parsed = Date.parse(m.kickoff);
+                if (!Number.isNaN(parsed)) return parsed;
+            }
+            const text = String((m && m.date) || '');
+            const hit = text.match(/^(\\d{1,2})\\/(\\d{1,2})\\s+(\\d{1,2}):(\\d{2})$/);
+            if (!hit) return Number.POSITIVE_INFINITY;
+            const now = new Date();
+            const dt = new Date(now.getFullYear(), Number(hit[1]) - 1, Number(hit[2]), Number(hit[3]), Number(hit[4]));
+            const diffDays = (now - dt) / 86400000;
+            if (diffDays > 180) dt.setFullYear(now.getFullYear() + 1);
+            else if (diffDays < -180) dt.setFullYear(now.getFullYear() - 1);
+            return dt.getTime();
+        }
+
+        function sortByKickoff(rows) {
+            return rows.slice().sort((a, b) => {
+                const diff = kickoffMs(a) - kickoffMs(b);
+                if (diff) return diff;
+                return String(a.home || '').localeCompare(String(b.home || ''), 'ko');
+            });
         }
 
         function renderRows() {
@@ -748,14 +798,25 @@ HTML_TEMPLATE = """
             let rows = allMatches.filter(m => {
                 if (currentLeague === 'streak') return !!m.h2h_checked;
                 if (currentLeague === 'pts') return !!m.pts_outlier;
+                if (currentLeague === 'form5') return !!m.form5_checked;
                 return currentLeague === 'all' || m.league === currentLeague;
             });
             if (currentLeague === 'pts') {
                 rows = rows.slice().sort((a, b) => Math.abs(b.pts_residual || 0) - Math.abs(a.pts_residual || 0));
+            } else if (currentLeague === 'form5') {
+                rows = rows.slice().sort((a, b) => {
+                    const av = Math.max(Number(a.form5_home_pts) || 0, Number(a.form5_away_pts) || 0);
+                    const bv = Math.max(Number(b.form5_home_pts) || 0, Number(b.form5_away_pts) || 0);
+                    return bv - av || kickoffMs(a) - kickoffMs(b);
+                });
+            } else {
+                rows = sortByKickoff(rows);
             }
             if (!rows.length) {
                 const emptyMsg = currentLeague === 'pts'
                     ? '같은 승점차의 평균 배당 대비 편차가 큰 경기가 없습니다.'
+                    : currentLeague === 'form5'
+                    ? '최근 5경기 승점이 9점 이상인 팀이 없습니다.'
                     : '표시할 축구 승무패 경기가 없습니다.';
                 setStatus(`
                     <div class="no-data">
@@ -765,7 +826,7 @@ HTML_TEMPLATE = """
                 return;
             }
             body.innerHTML = rows.map(m => `
-                <tr data-league="${escapeHtml(m.league)}" class="${m.pts_outlier ? 'pts-hot' : (m.h2h_checked ? 'h2h-hot' : '')}">
+                <tr data-league="${escapeHtml(m.league)}" class="${rowHotClass(m)}">
                     <td style="color:#888;">${escapeHtml(m.date)}</td>
                     <td><span class="league-badge ${leagueClass(m.league)}">${escapeHtml(m.league)}</span></td>
                     <td class="team-name">${escapeHtml(m.home)}</td>
@@ -784,6 +845,7 @@ HTML_TEMPLATE = """
                     </td>
                     <td><span class="signal-badge ${escapeHtml(m.signal_class)}">${escapeHtml(m.signal)}</span></td>
                     <td>${ptsCell(m)}</td>
+                    <td>${form5Cell(m)}</td>
                     <td>${h2hCell(m)}</td>
                 </tr>
             `).join('');
@@ -803,6 +865,10 @@ HTML_TEMPLATE = """
             document.getElementById('awayFavCount').textContent = data.away_fav_count ?? 0;
             document.getElementById('h2hStreakCount').textContent = data.h2h_streak_count ?? 0;
             document.getElementById('ptsOutlierCount').textContent = allMatches.filter(m => m.pts_outlier).length;
+            const form5Count = document.getElementById('form5Count');
+            if (form5Count) {
+                form5Count.textContent = data.form5_count ?? allMatches.filter(m => m.form5_checked).length;
+            }
             h2hReady = !!data.h2h_ready;
             renderFilters(data.leagues || []);
             renderRows();
@@ -871,7 +937,7 @@ HTML_TEMPLATE = """
             }
         }
 
-        document.getElementById('filterBar').addEventListener('click', (event) => {
+        document.getElementById('filterWrap').addEventListener('click', (event) => {
             const btn = event.target.closest('.filter-btn');
             if (!btn) return;
             if (btn.id === 'refreshBtn') {
@@ -918,12 +984,13 @@ def _empty_payload(pending=True, error=None):
         'home_fav_count': 0,
         'away_fav_count': 0,
         'h2h_streak_count': 0,
+        'form5_count': 0,
         'h2h_ready': False,
     }
 
 
 def _full_payload(data):
-    from scraper import PROTO_FOTMOB_LEAGUE_IDS
+    from scraper import PROTO_FOTMOB_LEAGUE_IDS, _sort_matches
 
     matches = data.get('matches') or []
     # 캐시에 남은 주변 리그(노르웨이·사우디 등)는 화면에서 제외
@@ -945,11 +1012,7 @@ def _full_payload(data):
             continue
         filtered.append(m)
     matches = filtered
-    matches.sort(key=lambda m: (
-        str(m.get('date') or ''),
-        str(m.get('league') or ''),
-        str(m.get('home') or ''),
-    ))
+    _sort_matches(matches)
     leagues = list(dict.fromkeys(m['league'] for m in matches))
     return {
         'ready': True,
@@ -964,6 +1027,7 @@ def _full_payload(data):
         'home_fav_count': sum(1 for m in matches if m.get('fav_side') == '홈'),
         'away_fav_count': sum(1 for m in matches if m.get('fav_side') == '원정'),
         'h2h_streak_count': sum(1 for m in matches if m.get('h2h_checked')),
+        'form5_count': sum(1 for m in matches if m.get('form5_checked')),
         'h2h_ready': bool(data.get('h2h_ready')),
     }
 

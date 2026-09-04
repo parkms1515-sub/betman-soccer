@@ -444,6 +444,23 @@ def _empty_pts():
     }
 
 
+FORM5_GAMES = 5
+FORM5_MIN_PTS = 9
+
+
+def _empty_form5():
+    return {
+        'form5_checked': False,
+        'form5_home_pts': None,
+        'form5_away_pts': None,
+        'form5_home': '',
+        'form5_away': '',
+        'form5_team': '',
+        'form5_side': '',
+        'form5_pts': 0,
+    }
+
+
 def _as_int(value):
     try:
         if value is None or value == '':
@@ -537,6 +554,13 @@ PROTO_FOTMOB_LEAGUE_IDS = frozenset({
 
 FOTMOB_ODDS_LEAGUE_IDS = PROTO_FOTMOB_LEAGUE_IDS
 
+# 승점9점은 국내 리그 정규 시즌만 사용. 챔스·유로파·컵·친선은 제외.
+CUP_FOTMOB_LEAGUE_IDS = frozenset({42, 73})
+FORM5_LEAGUE_IDS = frozenset(
+    league_id for league_id in PROTO_FOTMOB_LEAGUE_IDS
+    if league_id not in CUP_FOTMOB_LEAGUE_IDS
+)
+
 TEAM_HINTS = (
     ('맨체스터시티', 'manchester city'),
     ('맨체스터유나이티드', 'manchester united'),
@@ -613,7 +637,7 @@ TEAM_HINTS = (
     ('이랜드', 'eland'),
 )
 
-_FOTMOB = {'catalog': None, 'tables': {}, 'leagues': {}}
+_FOTMOB = {'catalog': None, 'tables': {}, 'leagues': {}, 'form5': {}}
 
 
 def _fotmob_get(url, params=None):
@@ -739,23 +763,31 @@ def _extract_fotmob_rows(data):
     return ordered
 
 
-def _fotmob_league(league_id):
-    cached = _FOTMOB['leagues'].get(league_id)
+def _fotmob_league(league_id, season=None):
+    league_id = int(league_id)
+    season = str(season or '')
+    key = (league_id, season)
+    cached = _FOTMOB['leagues'].get(key)
     if cached is not None:
         return cached
     try:
-        data = _fotmob_get(f'https://www.fotmob.com/api/data/leagues?id={league_id}') or {}
+        params = {'id': str(league_id)}
+        if season:
+            params['season'] = season
+        data = _fotmob_get('https://www.fotmob.com/api/data/leagues', params) or {}
+        label = (data.get('details') or {}).get('name') or ''
+        extra = f' {season}' if season else ''
         print(
-            f"[FOTMOB] {league_id} {(data.get('details') or {}).get('name') or ''} "
+            f"[FOTMOB] {league_id}{extra} {label} "
             f"일정 {len(((data.get('fixtures') or {}).get('allMatches') or []))}경기",
             flush=True,
         )
     except Exception as exc:
-        print(f'[FOTMOB] 리그 {league_id} 실패: {exc}', flush=True)
+        print(f'[FOTMOB] 리그 {league_id} {season} 실패: {exc}', flush=True)
         data = {}
-    _FOTMOB['leagues'][league_id] = data
-    rows = _extract_fotmob_rows(data)
-    _FOTMOB['tables'][league_id] = rows
+    _FOTMOB['leagues'][key] = data
+    if not season:
+        _FOTMOB['tables'][league_id] = _extract_fotmob_rows(data)
     return data
 
 
@@ -994,11 +1026,33 @@ def _collect_fotmob_fixtures():
     return fixtures
 
 
+def _kickoff_sort_value(match):
+    raw = match.get('kickoff')
+    if isinstance(raw, datetime):
+        dt = raw if raw.tzinfo else raw.replace(tzinfo=KST)
+        return dt
+    parsed = _parse_utc(raw) if raw else None
+    if parsed:
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=KST)
+    text = str(match.get('date') or '').strip()
+    try:
+        dt = datetime.strptime(text, '%m/%d %H:%M').replace(tzinfo=KST)
+    except ValueError:
+        return datetime.max.replace(tzinfo=KST)
+    now = datetime.now(KST)
+    dt = dt.replace(year=now.year)
+    if (now - dt).days > 180:
+        dt = dt.replace(year=now.year + 1)
+    elif (dt - now).days > 180:
+        dt = dt.replace(year=now.year - 1)
+    return dt
+
+
 def _sort_matches(matches):
     matches.sort(key=lambda m: (
-        str(m.get('date') or ''),
-        str(m.get('league') or ''),
+        _kickoff_sort_value(m),
         str(m.get('home') or ''),
+        str(m.get('away') or ''),
     ))
     return matches
 
@@ -1045,8 +1099,10 @@ def _scrape_fotmob_odds(include_h2h=True, progress=None):
         decorated = _decorate_odds(
             home, away, extracted['win'], extracted['draw'], extracted['lose']
         )
+        kickoff = item.get('kickoff')
         matches.append({
             'date': item['date'],
+            'kickoff': kickoff.isoformat() if isinstance(kickoff, datetime) else (kickoff or ''),
             'league': item['league'],
             'league_code': str(item['league_id']),
             'fotmob_league_id': item['league_id'],
@@ -1060,6 +1116,7 @@ def _scrape_fotmob_odds(include_h2h=True, progress=None):
             **decorated,
             **_empty_h2h(),
             **_empty_pts(),
+            **_empty_form5(),
         })
         odds_ok += 1
         if odds_ok in (3, 8) or odds_ok % 12 == 0:
@@ -1071,6 +1128,7 @@ def _scrape_fotmob_odds(include_h2h=True, progress=None):
         last_dt = next((item.get('kickoff') for item in reversed(fixtures) if item.get('kickoff')), None)
         result['sale_end'] = last_dt.strftime('%Y-%m-%d %H:%M') if last_dt else '-'
     _attach_points(matches)
+    _attach_form5(matches)
     result = emit(False)
     if include_h2h:
         _attach_fotmob_h2h(matches)
@@ -1223,6 +1281,178 @@ def _attach_points(matches):
         filled += league_filled
         print(f'[FOTMOB] {league} {league_filled}/{len(group)}경기', flush=True)
     print(f'승점 수집(FotMob): {len(matches)}경기 중 {filled}건', flush=True)
+
+
+def _parse_score_str(text):
+    parts = str(text or '').replace('–', '-').replace(':', '-').split('-')
+    if len(parts) < 2:
+        return None
+    try:
+        return int(parts[0].strip()), int(parts[1].strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _is_cup_or_friendly(raw):
+    blob = ' '.join(
+        str(raw.get(key) or '')
+        for key in ('tournamentName', 'tournament', 'name', 'round', 'roundName')
+    ).lower()
+    return any(
+        token in blob
+        for token in (
+            'friendly', 'friendlies', '친선', ' cup', 'cup ', '컵', 'copa',
+            'coupe', 'pokal', 'trophy', 'fa cup', 'league cup', 'carabao',
+        )
+    )
+
+
+def _finished_team_results(raw_matches):
+    by_team = {}
+    for raw in raw_matches or []:
+        if _is_cup_or_friendly(raw):
+            continue
+        status = raw.get('status') or {}
+        if not status.get('finished') or status.get('cancelled'):
+            continue
+        score = _parse_score_str(status.get('scoreStr'))
+        if not score:
+            continue
+        home_score, away_score = score
+        utc = status.get('utcTime') or ''
+        home_id = str((raw.get('home') or {}).get('id') or '')
+        away_id = str((raw.get('away') or {}).get('id') or '')
+        if home_id:
+            if home_score > away_score:
+                result, pts = '승', 3
+            elif home_score < away_score:
+                result, pts = '패', 0
+            else:
+                result, pts = '무', 1
+            by_team.setdefault(home_id, []).append((utc, pts, result))
+        if away_id:
+            if away_score > home_score:
+                result, pts = '승', 3
+            elif away_score < home_score:
+                result, pts = '패', 0
+            else:
+                result, pts = '무', 1
+            by_team.setdefault(away_id, []).append((utc, pts, result))
+    return by_team
+
+
+def _summarize_form5(items):
+    last = sorted(items or [], key=lambda item: item[0] or '', reverse=True)[:FORM5_GAMES]
+    if len(last) < FORM5_GAMES:
+        return None
+    return {
+        'pts': sum(item[1] for item in last),
+        'form': ''.join(item[2] for item in last),
+    }
+
+
+def _previous_season_id(data):
+    seasons = list(data.get('allAvailableSeasons') or [])
+    current = (
+        (data.get('details') or {}).get('selectedSeason')
+        or (data.get('details') or {}).get('season')
+        or ''
+    )
+    if current in seasons:
+        idx = seasons.index(current)
+        if idx + 1 < len(seasons):
+            return seasons[idx + 1]
+    if len(seasons) >= 2:
+        return seasons[1]
+    return None
+
+
+def _form5_results_for_league(league_id, team_ids):
+    if int(league_id) not in FORM5_LEAGUE_IDS:
+        return {}
+    data = _fotmob_league(league_id)
+    raw = ((data.get('fixtures') or {}).get('allMatches') or [])
+    by_team = _finished_team_results(raw)
+    needed = {str(tid) for tid in (team_ids or []) if tid}
+    in_league = [tid for tid in needed if tid in by_team]
+    if in_league and any(len(by_team.get(tid) or []) < FORM5_GAMES for tid in in_league):
+        prev = _previous_season_id(data)
+        if prev:
+            time.sleep(0.12)
+            prev_data = _fotmob_league(league_id, season=prev)
+            prev_raw = ((prev_data.get('fixtures') or {}).get('allMatches') or [])
+            for tid, items in _finished_team_results(prev_raw).items():
+                by_team.setdefault(tid, []).extend(items)
+    return by_team
+
+
+def _form5_global_map(team_ids):
+    cached = _FOTMOB['form5'].get('__all__')
+    if cached is not None:
+        return cached
+    needed = {str(tid) for tid in (team_ids or []) if tid}
+    combined = {}
+    for league_id in sorted(FORM5_LEAGUE_IDS):
+        by_team = _form5_results_for_league(league_id, needed)
+        for tid, items in by_team.items():
+            if tid not in combined or len(items) > len(combined[tid]):
+                combined[tid] = items
+    result = {}
+    for tid, items in combined.items():
+        summary = _summarize_form5(items)
+        if summary:
+            result[tid] = summary
+    _FOTMOB['form5']['__all__'] = result
+    return result
+
+
+def _fill_form5(match, home_info, away_info):
+    match.update(_empty_form5())
+    if home_info:
+        match['form5_home_pts'] = home_info.get('pts')
+        match['form5_home'] = home_info.get('form') or ''
+    if away_info:
+        match['form5_away_pts'] = away_info.get('pts')
+        match['form5_away'] = away_info.get('form') or ''
+    home_hot = bool(home_info and (home_info.get('pts') or 0) >= FORM5_MIN_PTS)
+    away_hot = bool(away_info and (away_info.get('pts') or 0) >= FORM5_MIN_PTS)
+    if home_hot and (not away_hot or (home_info.get('pts') or 0) >= (away_info.get('pts') or 0)):
+        match.update(
+            form5_checked=True,
+            form5_team=match.get('home') or '',
+            form5_side='홈',
+            form5_pts=home_info.get('pts') or 0,
+        )
+    elif away_hot:
+        match.update(
+            form5_checked=True,
+            form5_team=match.get('away') or '',
+            form5_side='원정',
+            form5_pts=away_info.get('pts') or 0,
+        )
+
+
+def _attach_form5(matches):
+    """리그 최근 5경기 승점이 9점 이상인 팀을 표시합니다. 컵·친선은 넣지 않습니다."""
+    for match in matches:
+        match.update(_empty_form5())
+    team_ids = set()
+    for match in matches:
+        if match.get('home_id'):
+            team_ids.add(str(match.get('home_id')))
+        if match.get('away_id'):
+            team_ids.add(str(match.get('away_id')))
+    fmap = _form5_global_map(team_ids)
+    hot = 0
+    for match in matches:
+        _fill_form5(
+            match,
+            fmap.get(str(match.get('home_id') or '')),
+            fmap.get(str(match.get('away_id') or '')),
+        )
+        if match.get('form5_checked'):
+            hot += 1
+    print(f'최근5 9점+(리그): {len(matches)}경기 중 {hot}건', flush=True)
 
 
 def _h2h_winner_id(el):
@@ -1483,11 +1713,12 @@ def parse_game_data(game_data):
                 'signal_class': signal_class,
                 **_empty_h2h(),
                 **_empty_pts(),
+                **_empty_form5(),
             })
         except (IndexError, KeyError, TypeError):
             continue
 
-    matches.sort(key=lambda x: x['date'])
+    _sort_matches(matches)
     result['matches'] = matches
     return result
 
@@ -1512,6 +1743,9 @@ def get_dummy_result():
                 'h2h_streak': 4, 'h2h_form': '승승승승무',
                 'home_pts': 52, 'away_pts': 48, 'home_rank': 2, 'away_rank': 4,
                 'pts_source': 'fotmob',
+                'form5_checked': True, 'form5_team': '울산HD', 'form5_side': '홈', 'form5_pts': 13,
+                'form5_home_pts': 13, 'form5_away_pts': 6,
+                'form5_home': '승승승승무', 'form5_away': '패승무패승',
             },
             {
                 'date': '09/06 19:00', 'league': 'K리그1', 'home': '전북', 'away': '인천',
@@ -1525,6 +1759,9 @@ def get_dummy_result():
                 'h2h_form': '승무패승패',
                 'home_pts': 41, 'away_pts': 40, 'home_rank': 7, 'away_rank': 8,
                 'pts_source': 'fotmob',
+                **_empty_form5(),
+                'form5_home_pts': 7, 'form5_away_pts': 5,
+                'form5_home': '승무패승패', 'form5_away': '무패승패무',
             },
             {
                 'date': '09/07 04:00', 'league': 'EPL', 'home': '맨체스터시티', 'away': '아스널',
@@ -1538,6 +1775,9 @@ def get_dummy_result():
                 'h2h_streak': 3, 'h2h_form': '패패패승무',
                 'home_pts': 38, 'away_pts': 55, 'home_rank': 10, 'away_rank': 1,
                 'pts_source': 'fotmob',
+                'form5_checked': True, 'form5_team': '아스널', 'form5_side': '원정', 'form5_pts': 12,
+                'form5_home_pts': 8, 'form5_away_pts': 12,
+                'form5_home': '승패승무승', 'form5_away': '승승승무승',
             },
         ],
         'fetched_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
