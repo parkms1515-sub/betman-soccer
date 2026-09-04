@@ -191,7 +191,7 @@ def dump_result(path):
         print(tb, flush=True)
         _atomic_write_json(path, {
             'matches': [],
-            'error': str(exc),
+            'error': (str(exc) + '\n\n' + tb)[-2500:],
             'h2h_ready': True,
             'cached': False,
         })

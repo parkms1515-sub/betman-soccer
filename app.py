@@ -688,27 +688,51 @@ def _load_dump_file():
 
 def _run_job():
     print('[JOB] scrape start', flush=True)
+    log_lines = []
     try:
         scraper = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'scraper.py')
         proc = subprocess.Popen(
             [sys.executable, '-u', scraper, '--dump', DUMP_PATH],
             cwd=os.path.dirname(os.path.abspath(__file__)),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
         )
+
+        def _read_output():
+            if not proc.stdout:
+                return
+            for line in proc.stdout:
+                print(line, end='', flush=True)
+                log_lines.append(line)
+
+        reader = threading.Thread(target=_read_output, daemon=True)
+        reader.start()
         while proc.poll() is None:
             _load_dump_file()
             time.sleep(1)
+        reader.join(timeout=5)
         _load_dump_file()
+        log_tail = ''.join(log_lines[-60:]).strip()
         if proc.returncode != 0:
             print('[JOB] scrape exit', proc.returncode, flush=True)
             with _STATE_LOCK:
                 if not _STATE['data']:
-                    _STATE['error'] = f'수집 실패 (code {proc.returncode})'
+                    current = _STATE.get('error') or ''
+                    if current and not current.startswith('수집 실패'):
+                        _STATE['error'] = current
+                    elif log_tail:
+                        _STATE['error'] = log_tail[-2500:]
+                    else:
+                        _STATE['error'] = f'수집 실패 (code {proc.returncode})'
         else:
             print('[JOB] scrape done', flush=True)
     except Exception as exc:
         print('[JOB] scrape error', exc, flush=True)
         with _STATE_LOCK:
-            _STATE['error'] = str(exc)
+            if not _STATE['error']:
+                _STATE['error'] = str(exc)
     finally:
         with _STATE_LOCK:
             _STATE['running'] = False
