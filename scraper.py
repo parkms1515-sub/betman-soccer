@@ -6,6 +6,7 @@ from playwright.sync_api import sync_playwright
 from datetime import datetime
 import json
 import os
+import sys
 import threading
 import time
 
@@ -14,7 +15,6 @@ H2H_CACHE_TTL_SEC = 3600
 _CACHE = {'data': None, 'ts': 0.0}
 _H2H_CACHE = {}
 _SCRAPE_LOCK = threading.Lock()
-_H2H_GEN = 0
 
 
 def _chromium_args():
@@ -29,7 +29,7 @@ def _chromium_args():
         '--no-first-run',
     ]
     if os.environ.get('RENDER') or os.environ.get('LOW_MEMORY') == '1':
-        args.extend(['--single-process', '--no-zygote'])
+        args.append('--disable-features=Translate,BackForwardCache,AcceptCHFrame')
     return args
 
 
@@ -52,7 +52,10 @@ def fetch_betman_data(force=False):
             cached = dict(_CACHE['data'])
             cached['cached'] = True
             return cached
-        return _scrape_odds()
+        result = _scrape_odds()
+        if result and not result.get('h2h_ready'):
+            _run_h2h_sync(result)
+        return result
 
 
 def _scrape_odds():
@@ -122,25 +125,11 @@ def _scrape_odds():
                 pass
         p.stop()
 
-    if result and not result.get('h2h_ready'):
-        _start_h2h_thread(result)
     return result or get_dummy_result()
 
 
-def _start_h2h_thread(result):
-    global _H2H_GEN
-    _H2H_GEN += 1
-    gen = _H2H_GEN
-    thread = threading.Thread(
-        target=_h2h_worker,
-        args=(gen, result),
-        daemon=True,
-    )
-    thread.start()
-
-
-def _h2h_worker(gen, result):
-    """배당 응답 후에 상대전적만 따로 채웁니다. 헬스체크를 막지 않습니다."""
+def _run_h2h_sync(result):
+    """같은 프로세스에서 상대전적을 이어서 수집합니다."""
     gm_ts = result.get('gm_ts') or 260105
     matches = result.get('matches') or []
     p = sync_playwright().start()
@@ -153,13 +142,11 @@ def _h2h_worker(gen, result):
             timeout=30000,
         )
         page.wait_for_timeout(1500)
-        if gen != _H2H_GEN:
-            return
         _attach_h2h_streaks(page, matches, gm_ts)
-        if gen == _H2H_GEN:
-            result['h2h_ready'] = True
+        result['h2h_ready'] = True
     except Exception as exc:
-        print('[WARN] 상대전적 백그라운드 수집 실패:', exc)
+        print('[WARN] 상대전적 수집 실패:', exc, flush=True)
+        result['h2h_ready'] = True
     finally:
         if browser:
             try:
@@ -167,6 +154,25 @@ def _h2h_worker(gen, result):
             except Exception:
                 pass
         p.stop()
+
+
+def _atomic_write_json(path, data):
+    tmp_path = path + '.tmp'
+    with open(tmp_path, 'w', encoding='utf-8') as fh:
+        json.dump(data, fh, ensure_ascii=False)
+    os.replace(tmp_path, path)
+
+
+def dump_result(path):
+    """별도 프로세스에서 배당을 먼저 저장한 뒤 상대전적을 이어 씁니다."""
+    result = _scrape_odds()
+    _atomic_write_json(path, result)
+    print(f'[DUMP] odds {len(result.get("matches") or [])}건 저장', flush=True)
+    if result.get('matches') and not result.get('h2h_ready'):
+        _run_h2h_sync(result)
+        _atomic_write_json(path, result)
+        print('[DUMP] h2h 저장', flush=True)
+    return result
 
 
 def _safe_float(value):
@@ -528,6 +534,9 @@ def get_dummy_result():
 
 
 if __name__ == '__main__':
+    if len(sys.argv) >= 3 and sys.argv[1] == '--dump':
+        dump_result(sys.argv[2])
+        raise SystemExit(0)
     result = fetch_betman_data(force=True)
     print(f"회차: {result['round_info']}")
     print(f"마감: {result['sale_end']}")

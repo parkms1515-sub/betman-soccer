@@ -2,12 +2,27 @@
 Betman Soccer Rule Analyzer - 베트맨 축구 배당률 분석기
 Flask 웹 애플리케이션
 """
+import json
 import os
+import subprocess
+import sys
+import tempfile
+import threading
+import time
 
 from flask import Flask, render_template_string, jsonify, request
-from scraper import fetch_betman_data
 
 app = Flask(__name__)
+
+DUMP_PATH = os.path.join(tempfile.gettempdir(), 'betman.json')
+CACHE_TTL_SEC = 180
+_STATE = {
+    'data': None,
+    'ts': 0.0,
+    'running': False,
+    'error': None,
+}
+_STATE_LOCK = threading.Lock()
 
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -562,14 +577,23 @@ HTML_TEMPLATE = """
                 <tr><td colspan="11">
                     <div class="loading">
                         <div class="spinner"></div>
-                        <div>${force ? '최신 배당을 다시 수집하는 중...' : '베트맨에서 최신 배당을 가져오는 중입니다. 약 15초 걸릴 수 있습니다.'}</div>
+                        <div>${force ? '최신 배당을 다시 수집하는 중...' : '베트맨에서 최신 배당을 가져오는 중입니다. 약 20초 걸릴 수 있습니다.'}</div>
                     </div>
                 </td></tr>`;
             try {
-                const url = force ? '/api/data?refresh=1' : '/api/data';
-                const res = await fetch(url);
-                if (!res.ok) throw new Error('HTTP ' + res.status);
-                applyData(await res.json());
+                for (let i = 0; i < 40; i++) {
+                    const url = (force && i === 0) ? '/api/data?refresh=1' : '/api/data';
+                    const res = await fetch(url);
+                    if (!res.ok) throw new Error('HTTP ' + res.status);
+                    const data = await res.json();
+                    if (data.error && !data.ready) throw new Error(data.error);
+                    if (data.ready) {
+                        applyData(data);
+                        return;
+                    }
+                    await new Promise(resolve => setTimeout(resolve, 2000));
+                }
+                throw new Error('timeout');
             } catch (err) {
                 body.innerHTML = `
                     <tr><td colspan="11">
@@ -601,11 +625,31 @@ HTML_TEMPLATE = """
 """
 
 
-def _payload(force=False):
-    data = fetch_betman_data(force=force)
-    matches = data.get('matches', [])
+def _empty_payload(pending=True, error=None):
+    return {
+        'ready': False,
+        'pending': pending,
+        'error': error,
+        'matches': [],
+        'leagues': [],
+        'round_info': '-',
+        'sale_end': '-',
+        'fetched_at': '-',
+        'cached': False,
+        'home_fav_count': 0,
+        'away_fav_count': 0,
+        'h2h_streak_count': 0,
+        'h2h_ready': False,
+    }
+
+
+def _full_payload(data):
+    matches = data.get('matches') or []
     leagues = list(dict.fromkeys(m['league'] for m in matches))
     return {
+        'ready': True,
+        'pending': False,
+        'error': None,
         'matches': matches,
         'leagues': leagues,
         'round_info': data.get('round_info', '-'),
@@ -617,6 +661,84 @@ def _payload(force=False):
         'h2h_streak_count': sum(1 for m in matches if m.get('h2h_checked')),
         'h2h_ready': bool(data.get('h2h_ready')),
     }
+
+
+def _load_dump_file():
+    if not os.path.isfile(DUMP_PATH):
+        return None
+    try:
+        with open(DUMP_PATH, encoding='utf-8') as fh:
+            data = json.load(fh)
+        if data.get('matches'):
+            with _STATE_LOCK:
+                _STATE['data'] = data
+                _STATE['ts'] = time.time()
+                _STATE['error'] = None
+            return data
+    except Exception as exc:
+        print('[JOB] dump read fail', exc, flush=True)
+    return None
+
+
+def _run_job():
+    print('[JOB] scrape start', flush=True)
+    try:
+        scraper = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'scraper.py')
+        proc = subprocess.Popen(
+            [sys.executable, '-u', scraper, '--dump', DUMP_PATH],
+            cwd=os.path.dirname(os.path.abspath(__file__)),
+        )
+        while proc.poll() is None:
+            _load_dump_file()
+            time.sleep(1)
+        _load_dump_file()
+        if proc.returncode != 0:
+            print('[JOB] scrape exit', proc.returncode, flush=True)
+            with _STATE_LOCK:
+                if not _STATE['data']:
+                    _STATE['error'] = f'수집 실패 (code {proc.returncode})'
+        else:
+            print('[JOB] scrape done', flush=True)
+    except Exception as exc:
+        print('[JOB] scrape error', exc, flush=True)
+        with _STATE_LOCK:
+            _STATE['error'] = str(exc)
+    finally:
+        with _STATE_LOCK:
+            _STATE['running'] = False
+
+
+def _ensure_job(force=False):
+    now = time.time()
+    with _STATE_LOCK:
+        fresh = _STATE['data'] and (now - _STATE['ts']) < CACHE_TTL_SEC
+        if not force and fresh:
+            return
+        if _STATE['running']:
+            return
+        if force:
+            _STATE['data'] = None
+            _STATE['ts'] = 0.0
+            _STATE['error'] = None
+            try:
+                os.remove(DUMP_PATH)
+            except OSError:
+                pass
+        _STATE['running'] = True
+    threading.Thread(target=_run_job, daemon=True).start()
+
+
+def _payload(force=False):
+    _ensure_job(force=force)
+    with _STATE_LOCK:
+        data = _STATE['data']
+        running = _STATE['running']
+        error = _STATE['error']
+    if data:
+        payload = _full_payload(data)
+        payload['cached'] = (not running) and (not force)
+        return payload
+    return _empty_payload(pending=running, error=error)
 
 
 @app.route('/')
