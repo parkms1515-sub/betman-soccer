@@ -1,6 +1,5 @@
 """
-Betman Soccer Rule Analyzer - 베트맨 축구 배당률 분석기
-Flask 웹 애플리케이션
+프로토 축구 배당 분석기 - FotMob 참고 배당 Flask 앱
 """
 import json
 import os
@@ -29,13 +28,14 @@ HTML_TEMPLATE = """
 <html lang="ko">
 <head>
     <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>베트맨 축구 배당률 분석기</title>
-    <meta name="description" content="베트맨 프로토 승부식 축구 배당률 실시간 분석">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <title>프로토 축구 배당 분석기</title>
+    <meta name="description" content="프로토 축구 승무패 참고 배당(FotMob) 분석">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
 
+        html { -webkit-text-size-adjust: 100%; }
         body {
             font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
             background: linear-gradient(135deg, #0f0c29 0%, #1a1a3e 50%, #24243e 100%);
@@ -137,6 +137,8 @@ HTML_TEMPLATE = """
             font-size: 0.82rem;
             transition: all 0.2s;
             font-family: inherit;
+            touch-action: manipulation;
+            -webkit-tap-highlight-color: transparent;
         }
 
         .filter-btn:hover, .filter-btn.active {
@@ -190,6 +192,7 @@ HTML_TEMPLATE = """
 
         tbody tr:hover { background: rgba(0, 210, 255, 0.04); }
         tbody tr.h2h-hot { background: rgba(255, 171, 64, 0.05); }
+        tbody tr.pts-hot { background: rgba(255, 82, 82, 0.06); }
 
         td {
             padding: 12px;
@@ -283,6 +286,27 @@ HTML_TEMPLATE = """
         .h2h-none { color: #666; font-size: 0.78rem; }
         .h2h-form { font-size: 0.68rem; color: #777; margin-top: 3px; letter-spacing: 1px; }
 
+        .pts-hot-badge {
+            display: inline-block;
+            padding: 4px 10px;
+            border-radius: 8px;
+            font-size: 0.74rem;
+            font-weight: 700;
+            background: rgba(255, 82, 82, 0.16);
+            color: #ff8a80;
+            border: 1px solid rgba(255, 82, 82, 0.28);
+        }
+
+        .pts-norm-badge {
+            display: inline-block;
+            padding: 4px 10px;
+            border-radius: 8px;
+            font-size: 0.74rem;
+            font-weight: 600;
+            background: rgba(255, 255, 255, 0.05);
+            color: #bbb;
+        }
+
         .vote-bar {
             display: flex;
             height: 6px;
@@ -333,21 +357,80 @@ HTML_TEMPLATE = """
 
         @keyframes spin { to { transform: rotate(360deg); } }
 
+        .card-list { display: none; }
+        .match-card {
+            background: rgba(255, 255, 255, 0.04);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 14px;
+            padding: 12px;
+        }
+        .match-card.h2h-hot { border-color: rgba(255, 171, 64, 0.35); }
+        .match-card.pts-hot { border-color: rgba(255, 82, 82, 0.4); }
+        .card-top {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 10px;
+            font-size: 0.75rem;
+            color: #8888aa;
+        }
+        .card-top .date { flex: 1; }
+        .card-teams {
+            display: grid;
+            grid-template-columns: 1fr auto 1fr;
+            gap: 8px;
+            align-items: center;
+            text-align: center;
+        }
+        .card-teams .name {
+            font-weight: 600;
+            color: #eee;
+            white-space: normal;
+            word-break: keep-all;
+            line-height: 1.3;
+            font-size: 0.92rem;
+        }
+        .card-teams .odds { font-size: 1.15rem; margin-top: 4px; }
+        .card-draw { color: #888; font-size: 0.72rem; }
+        .card-meta {
+            margin-top: 10px;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            align-items: center;
+            justify-content: space-between;
+        }
+        .card-meta .vote-text { white-space: normal; }
+
         @media (max-width: 768px) {
-            header h1 { font-size: 1.4rem; }
-            .container { padding: 12px; }
-            table { font-size: 0.8rem; }
-            td, thead th { padding: 8px 6px; }
+            header h1 { font-size: 1.25rem; }
+            .container { padding: 12px 12px calc(16px + env(safe-area-inset-bottom)); }
+            .meta-info { gap: 12px; font-size: 0.78rem; }
+            .stats-bar { grid-template-columns: repeat(3, 1fr); gap: 8px; }
+            .stat-card { padding: 10px 6px; }
+            .stat-card .number { font-size: 1.15rem; }
+            .stat-card .desc { font-size: 0.68rem; }
+            .filter-bar {
+                flex-wrap: nowrap;
+                overflow-x: auto;
+                -webkit-overflow-scrolling: touch;
+                padding-bottom: 6px;
+            }
+            .filter-btn { flex: 0 0 auto; min-height: 36px; }
+            .refresh-btn { position: sticky; right: 0; }
+            .table-wrapper { display: none; }
+            .card-list { display: flex; flex-direction: column; gap: 10px; }
+            .refresh-notice { font-size: 0.75rem; line-height: 1.5; }
         }
     </style>
 </head>
 <body>
     <div class="container">
         <header>
-            <h1>⚽ 베트맨 축구 배당률 분석기</h1>
+            <h1>⚽ 프로토 축구 배당 분석기</h1>
             <div class="meta-info">
-                <span><span class="label">프로토 회차</span> <span class="value" id="roundInfo">-</span></span>
-                <span><span class="label">발매 마감</span> <span class="value" id="saleEnd">-</span></span>
+                <span><span class="label">일정</span> <span class="value" id="roundInfo">-</span></span>
+                <span><span class="label">마지막 경기</span> <span class="value" id="saleEnd">-</span></span>
                 <span><span class="label">데이터 수집</span> <span class="value" id="fetchedAt">불러오는 중</span></span>
             </div>
         </header>
@@ -373,6 +456,10 @@ HTML_TEMPLATE = """
                 <div class="number" id="h2hStreakCount">-</div>
                 <div class="desc">상대전적 3연승+</div>
             </div>
+            <div class="stat-card">
+                <div class="number" id="ptsOutlierCount">-</div>
+                <div class="desc">승점차이 이탈</div>
+            </div>
         </div>
 
         <div class="filter-bar" id="filterBar">
@@ -392,17 +479,18 @@ HTML_TEMPLATE = """
                         <th>패 배당</th>
                         <th>원정</th>
                         <th>정배당</th>
-                        <th>투표 현황</th>
+                        <th>기대확률</th>
                         <th>분석</th>
+                        <th>승점차</th>
                         <th>상대전적</th>
                     </tr>
                 </thead>
                 <tbody id="matchBody">
                     <tr>
-                        <td colspan="11">
+                        <td colspan="12">
                             <div class="loading">
                                 <div class="spinner"></div>
-                                <div>베트맨에서 배당과 상대전적을 가져오는 중입니다. 첫 수집은 조금 더 걸릴 수 있습니다.</div>
+                                <div>FotMob에서 축구 배당을 가져오는 중입니다. 첫 수집은 조금 더 걸릴 수 있습니다.</div>
                             </div>
                         </td>
                     </tr>
@@ -410,8 +498,10 @@ HTML_TEMPLATE = """
             </table>
         </div>
 
+        <div class="card-list" id="matchCards"></div>
+
         <div class="refresh-notice">
-            데이터는 3분간 캐시됩니다. 새로고침을 누르면 베트맨에서 다시 수집합니다.
+            배당·승점·순위는 FotMob 참고 값입니다. 베트맨 공식 배당이 아니며, 승점차이는 이번 일정 전체 표준과 비교합니다.
         </div>
     </div>
 
@@ -428,6 +518,96 @@ HTML_TEMPLATE = """
 
         let h2hReady = false;
         let h2hPollTimer = null;
+
+        function toNum(value) {
+            if (value === null || value === undefined || value === '') return null;
+            const num = Number(value);
+            return Number.isFinite(num) ? num : null;
+        }
+
+        function linReg(xs, ys) {
+            const n = xs.length;
+            const mx = xs.reduce((a, b) => a + b, 0) / n;
+            const my = ys.reduce((a, b) => a + b, 0) / n;
+            let den = 0;
+            let num = 0;
+            for (let i = 0; i < n; i++) {
+                den += (xs[i] - mx) ** 2;
+                num += (xs[i] - mx) * (ys[i] - my);
+            }
+            const slope = den < 1e-9 ? 0 : num / den;
+            return { slope, intercept: my - slope * mx };
+        }
+
+        function stdev(values) {
+            if (values.length < 2) return 0;
+            const mean = values.reduce((a, b) => a + b, 0) / values.length;
+            const variance = values.reduce((a, b) => a + (b - mean) ** 2, 0) / (values.length - 1);
+            return Math.sqrt(variance);
+        }
+
+        function annotatePts(matches) {
+            const samples = [];
+            matches.forEach(m => {
+                const homePts = toNum(m.home_pts);
+                const awayPts = toNum(m.away_pts);
+                const win = toNum(m.win_allot);
+                const lose = toNum(m.lose_allot);
+                m.pts_diff = (homePts !== null && awayPts !== null) ? homePts - awayPts : null;
+                m.odds_gap = (win !== null && lose !== null) ? +(lose - win).toFixed(2) : null;
+                m.pts_expected_gap = null;
+                m.pts_residual = null;
+                m.pts_outlier = false;
+                m.pts_signal = '';
+                if (m.pts_diff !== null && m.odds_gap !== null) samples.push(m);
+            });
+            const markOpposite = (m) => (
+                m.pts_diff * m.odds_gap < 0 &&
+                Math.abs(m.pts_diff) >= 3 &&
+                Math.abs(m.odds_gap) >= 0.15
+            );
+            if (samples.length < 4) {
+                samples.forEach(m => {
+                    if (markOpposite(m)) {
+                        m.pts_outlier = true;
+                        m.pts_signal = '승점·배당 반대';
+                    }
+                });
+                return;
+            }
+            const xs = samples.map(m => m.pts_diff);
+            const ys = samples.map(m => m.odds_gap);
+            const fit = linReg(xs, ys);
+            const residuals = samples.map(m => m.odds_gap - (fit.slope * m.pts_diff + fit.intercept));
+            const threshold = Math.max(0.35, 0.9 * (stdev(residuals) || 0.4));
+            samples.forEach((m, i) => {
+                m.pts_expected_gap = +(fit.slope * m.pts_diff + fit.intercept).toFixed(2);
+                m.pts_residual = +residuals[i].toFixed(2);
+                const opposite = markOpposite(m);
+                m.pts_outlier = opposite || Math.abs(residuals[i]) >= threshold;
+                if (opposite) m.pts_signal = '승점·배당 반대';
+                else if (!m.pts_outlier) m.pts_signal = '표준';
+                else if (residuals[i] > 0) m.pts_signal = '배당 홈우세 과대';
+                else m.pts_signal = '배당 홈우세 과소';
+            });
+        }
+
+        function ptsCell(m) {
+            if (m.pts_diff === null || m.pts_diff === undefined) {
+                return '<span class="h2h-none">-</span>';
+            }
+            const diffText = (m.pts_diff > 0 ? '+' : '') + m.pts_diff + '점';
+            const cls = m.pts_outlier ? 'pts-hot-badge' : 'pts-norm-badge';
+            const resid = m.pts_residual == null
+                ? ''
+                : ` · 괴리 ${(m.pts_residual > 0 ? '+' : '') + m.pts_residual}`;
+            const signal = (m.pts_outlier && m.pts_signal)
+                ? `<div class="h2h-form">${escapeHtml(m.pts_signal)}</div>`
+                : '';
+            return `<span class="${cls}">${diffText}</span>` +
+                `<div class="h2h-form">${m.home_pts}-${m.away_pts}${resid}</div>` +
+                signal;
+        }
 
         function h2hCell(m) {
             const form = m.h2h_form
@@ -474,6 +654,11 @@ HTML_TEMPLATE = """
             streakBtn.dataset.league = 'streak';
             streakBtn.textContent = '3연승+';
             bar.insertBefore(streakBtn, refresh);
+            const ptsBtn = document.createElement('button');
+            ptsBtn.className = 'filter-btn' + (currentLeague === 'pts' ? ' active' : '');
+            ptsBtn.dataset.league = 'pts';
+            ptsBtn.textContent = '승점차이';
+            bar.insertBefore(ptsBtn, refresh);
             leagues.forEach(league => {
                 const btn = document.createElement('button');
                 btn.className = 'filter-btn' + (currentLeague === league ? ' active' : '');
@@ -483,24 +668,73 @@ HTML_TEMPLATE = """
             });
         }
 
+        function matchCard(m) {
+            const hot = m.pts_outlier ? 'pts-hot' : (m.h2h_checked ? 'h2h-hot' : '');
+            return `
+                <article class="match-card ${hot}">
+                    <div class="card-top">
+                        <span class="date">${escapeHtml(m.date)}</span>
+                        <span class="league-badge ${leagueClass(m.league)}">${escapeHtml(m.league)}</span>
+                        <span class="signal-badge ${escapeHtml(m.signal_class)}">${escapeHtml(m.signal)}</span>
+                    </div>
+                    <div class="card-teams">
+                        <div>
+                            <div class="name">${escapeHtml(m.home)}</div>
+                            <div class="odds odds-win ${m.fav_side === '홈' ? 'odds-lowest' : ''}">${m.win_allot}</div>
+                        </div>
+                        <div>
+                            <div class="card-draw">무</div>
+                            <div class="odds odds-draw">${m.draw_allot}</div>
+                        </div>
+                        <div>
+                            <div class="name">${escapeHtml(m.away)}</div>
+                            <div class="odds odds-lose ${m.fav_side === '원정' ? 'odds-lowest' : ''}">${m.lose_allot}</div>
+                        </div>
+                    </div>
+                    <div class="card-meta">
+                        <span class="fav-badge ${favClass(m.fav_side)}">${escapeHtml(m.fav_team)}</span>
+                        ${ptsCell(m)}
+                        ${h2hCell(m)}
+                    </div>
+                    <div class="vote-text">승${m.w_pct}% 무${m.d_pct}% 패${m.l_pct}%</div>
+                    <div class="vote-bar">
+                        <div class="vote-w" style="width:${m.w_pct}%"></div>
+                        <div class="vote-d" style="width:${m.d_pct}%"></div>
+                        <div class="vote-l" style="width:${m.l_pct}%"></div>
+                    </div>
+                </article>`;
+        }
+
+        function setStatus(html) {
+            document.getElementById('matchBody').innerHTML =
+                `<tr><td colspan="12">${html}</td></tr>`;
+            document.getElementById('matchCards').innerHTML = html;
+        }
+
         function renderRows() {
             const body = document.getElementById('matchBody');
-            const rows = allMatches.filter(m => {
+            const cards = document.getElementById('matchCards');
+            let rows = allMatches.filter(m => {
                 if (currentLeague === 'streak') return !!m.h2h_checked;
+                if (currentLeague === 'pts') return !!m.pts_outlier;
                 return currentLeague === 'all' || m.league === currentLeague;
             });
+            if (currentLeague === 'pts') {
+                rows = rows.slice().sort((a, b) => Math.abs(b.pts_residual || 0) - Math.abs(a.pts_residual || 0));
+            }
             if (!rows.length) {
-                body.innerHTML = `
-                    <tr><td colspan="11">
-                        <div class="no-data">
-                            <div class="icon">📊</div>
-                            <div>표시할 축구 승무패 경기가 없습니다.</div>
-                        </div>
-                    </td></tr>`;
+                const emptyMsg = currentLeague === 'pts'
+                    ? '승점 대비 배당 간격이 표준에서 벗어난 경기가 없습니다. 승점 수집 후 다시 올려 주세요.'
+                    : '표시할 축구 승무패 경기가 없습니다.';
+                setStatus(`
+                    <div class="no-data">
+                        <div class="icon">📊</div>
+                        <div>${emptyMsg}</div>
+                    </div>`);
                 return;
             }
             body.innerHTML = rows.map(m => `
-                <tr data-league="${escapeHtml(m.league)}" class="${m.h2h_checked ? 'h2h-hot' : ''}">
+                <tr data-league="${escapeHtml(m.league)}" class="${m.pts_outlier ? 'pts-hot' : (m.h2h_checked ? 'h2h-hot' : '')}">
                     <td style="color:#888;">${escapeHtml(m.date)}</td>
                     <td><span class="league-badge ${leagueClass(m.league)}">${escapeHtml(m.league)}</span></td>
                     <td class="team-name">${escapeHtml(m.home)}</td>
@@ -518,14 +752,17 @@ HTML_TEMPLATE = """
                         </div>
                     </td>
                     <td><span class="signal-badge ${escapeHtml(m.signal_class)}">${escapeHtml(m.signal)}</span></td>
+                    <td>${ptsCell(m)}</td>
                     <td>${h2hCell(m)}</td>
                 </tr>
             `).join('');
+            cards.innerHTML = rows.map(matchCard).join('');
         }
 
         function applyData(data) {
             allMatches = data.matches || [];
-            document.getElementById('roundInfo').textContent = (data.round_info || '-') + '회';
+            annotatePts(allMatches);
+            document.getElementById('roundInfo').textContent = data.round_info || '-';
             document.getElementById('saleEnd').textContent = data.sale_end || '-';
             const cacheTag = data.cached ? ' (캐시)' : '';
             document.getElementById('fetchedAt').textContent = (data.fetched_at || '-') + cacheTag;
@@ -534,6 +771,7 @@ HTML_TEMPLATE = """
             document.getElementById('homeFavCount').textContent = data.home_fav_count ?? 0;
             document.getElementById('awayFavCount').textContent = data.away_fav_count ?? 0;
             document.getElementById('h2hStreakCount').textContent = data.h2h_streak_count ?? 0;
+            document.getElementById('ptsOutlierCount').textContent = allMatches.filter(m => m.pts_outlier).length;
             h2hReady = !!data.h2h_ready;
             renderFilters(data.leagues || []);
             renderRows();
@@ -572,21 +810,18 @@ HTML_TEMPLATE = """
                 clearInterval(h2hPollTimer);
                 h2hPollTimer = null;
             }
-            const body = document.getElementById('matchBody');
-            body.innerHTML = `
-                <tr><td colspan="11">
+            setStatus(`
                     <div class="loading">
                         <div class="spinner"></div>
-                        <div>${force ? '최신 배당을 다시 수집하는 중...' : '데이터를 불러오는 중입니다.'}</div>
-                    </div>
-                </td></tr>`;
+                        <div>${force ? '최신 배당을 다시 수집하는 중...' : '데이터를 불러오는 중입니다. 휴대폰에서는 첫 로딩이 1~2분 걸릴 수 있습니다.'}</div>
+                    </div>`);
             try {
-                for (let i = 0; i < 40; i++) {
+                for (let i = 0; i < 90; i++) {
                     const url = (force && i === 0) ? '/api/data?refresh=1' : '/api/data';
                     const res = await fetch(url);
                     if (!res.ok) throw new Error('HTTP ' + res.status);
                     const data = await res.json();
-                    if (data.error && !data.ready) throw new Error(data.error);
+                    if (data.error && !data.ready && !(data.matches || []).length) throw new Error(data.error);
                     if (data.ready) {
                         applyData(data);
                         return;
@@ -596,14 +831,12 @@ HTML_TEMPLATE = """
                 throw new Error('timeout');
             } catch (err) {
                 const detail = err && err.message ? String(err.message) : '';
-                body.innerHTML = `
-                    <tr><td colspan="11">
-                        <div class="no-data">
-                            <div class="icon">⚠️</div>
-                            <div>데이터를 불러오지 못했습니다. 새로고침을 다시 눌러 주세요.</div>
-                            <div class="h2h-form" style="margin-top:8px;white-space:pre-wrap;max-width:720px;margin-left:auto;margin-right:auto;">${escapeHtml(detail)}</div>
-                        </div>
-                    </td></tr>`;
+                setStatus(`
+                    <div class="no-data">
+                        <div class="icon">⚠️</div>
+                        <div>데이터를 불러오지 못했습니다. 새로고침을 다시 눌러 주세요.</div>
+                        <div class="h2h-form" style="margin-top:8px;white-space:pre-wrap;max-width:720px;margin-left:auto;margin-right:auto;">${escapeHtml(detail)}</div>
+                    </div>`);
             }
         }
 
@@ -628,7 +861,7 @@ HTML_TEMPLATE = """
 
 
 def _remote_scrape_blocked():
-    return bool(os.environ.get('RENDER')) and not os.environ.get('BETMAN_PROXY')
+    return False
 
 
 def _blocked_message():
