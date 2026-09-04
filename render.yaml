@@ -9,3 +9,5 @@ services:
         value: "1"
       - key: LOW_MEMORY
         value: "1"
+      - key: PUSH_TOKEN
+        generateValue: true

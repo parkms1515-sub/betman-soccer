@@ -577,7 +577,7 @@ HTML_TEMPLATE = """
                 <tr><td colspan="11">
                     <div class="loading">
                         <div class="spinner"></div>
-                        <div>${force ? '최신 배당을 다시 수집하는 중...' : '베트맨에서 최신 배당을 가져오는 중입니다. 약 20초 걸릴 수 있습니다.'}</div>
+                        <div>${force ? '최신 배당을 다시 수집하는 중...' : '데이터를 불러오는 중입니다.'}</div>
                     </div>
                 </td></tr>`;
             try {
@@ -601,7 +601,7 @@ HTML_TEMPLATE = """
                         <div class="no-data">
                             <div class="icon">⚠️</div>
                             <div>데이터를 불러오지 못했습니다. 새로고침을 다시 눌러 주세요.</div>
-                            <div class="h2h-form" style="margin-top:8px;white-space:normal;max-width:720px;margin-left:auto;margin-right:auto;">${escapeHtml(detail)}</div>
+                            <div class="h2h-form" style="margin-top:8px;white-space:pre-wrap;max-width:720px;margin-left:auto;margin-right:auto;">${escapeHtml(detail)}</div>
                         </div>
                     </td></tr>`;
             }
@@ -625,6 +625,19 @@ HTML_TEMPLATE = """
 </body>
 </html>
 """
+
+
+def _remote_scrape_blocked():
+    return bool(os.environ.get('RENDER')) and not os.environ.get('BETMAN_PROXY')
+
+
+def _blocked_message():
+    url = (os.environ.get('RENDER_EXTERNAL_URL') or 'https://(렌더주소)').rstrip('/')
+    return (
+        '베트맨은 Render 해외 서버에서 접속이 차단됩니다.\n'
+        '한국 PC에서 아래를 실행하면 이 사이트에 배당이 올라갑니다.\n\n'
+        f'python scraper.py --publish {url}'
+    )
 
 
 def _empty_payload(pending=True, error=None):
@@ -739,6 +752,8 @@ def _run_job():
 
 
 def _ensure_job(force=False):
+    if _remote_scrape_blocked():
+        return
     now = time.time()
     with _STATE_LOCK:
         fresh = _STATE['data'] and (now - _STATE['ts']) < CACHE_TTL_SEC
@@ -768,6 +783,8 @@ def _payload(force=False):
         payload = _full_payload(data)
         payload['cached'] = (not running) and (not force)
         return payload
+    if _remote_scrape_blocked():
+        return _empty_payload(pending=False, error=_blocked_message())
     return _empty_payload(pending=running, error=error)
 
 
@@ -780,6 +797,28 @@ def index():
 def api_data():
     force = request.args.get('refresh') == '1'
     return jsonify(_payload(force=force))
+
+
+@app.route('/api/push', methods=['POST'])
+def api_push():
+    expected = os.environ.get('PUSH_TOKEN', '')
+    got = request.headers.get('X-Push-Token', '')
+    if expected and got != expected:
+        return jsonify({'ok': False, 'error': 'unauthorized'}), 401
+    data = request.get_json(silent=True) or {}
+    if not data.get('matches'):
+        return jsonify({'ok': False, 'error': 'no matches'}), 400
+    with _STATE_LOCK:
+        _STATE['data'] = data
+        _STATE['ts'] = time.time()
+        _STATE['error'] = None
+        _STATE['running'] = False
+    try:
+        with open(DUMP_PATH, 'w', encoding='utf-8') as fh:
+            json.dump(data, fh, ensure_ascii=False)
+    except Exception:
+        pass
+    return jsonify({'ok': True, 'matches': len(data.get('matches') or [])})
 
 
 @app.route('/health')

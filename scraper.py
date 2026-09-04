@@ -7,9 +7,12 @@ from datetime import datetime
 import json
 import os
 import sys
+import tempfile
 import threading
 import time
 import traceback
+import urllib.error
+import urllib.request
 
 CACHE_TTL_SEC = 180
 H2H_CACHE_TTL_SEC = 3600
@@ -40,6 +43,15 @@ JSON_HEADERS = {
     'X-Requested-With': 'XMLHttpRequest',
     'Origin': 'https://www.betman.co.kr',
 }
+
+
+def _launch_browser(playwright):
+    kwargs = {'headless': True, 'args': _chromium_args()}
+    proxy = os.environ.get('BETMAN_PROXY')
+    if proxy:
+        kwargs['proxy'] = {'server': proxy}
+        print('[SCRAPE] proxy', proxy, flush=True)
+    return playwright.chromium.launch(**kwargs)
 
 
 def _new_page(browser):
@@ -176,8 +188,7 @@ def _scrape_odds():
     browser = None
     result = None
     try:
-        print('[SCRAPE] chromium launch', flush=True)
-        browser = p.chromium.launch(headless=True, args=_chromium_args())
+        browser = _launch_browser(p)
         page = _new_page(browser)
         _warmup_betman(page)
         gm_ts = _fetch_round_ts(page)
@@ -207,7 +218,7 @@ def _run_h2h_sync(result):
     p = sync_playwright().start()
     browser = None
     try:
-        browser = p.chromium.launch(headless=True, args=_chromium_args())
+        browser = _launch_browser(p)
         page = _new_page(browser)
         _warmup_betman(page)
         _attach_h2h_streaks(page, matches, gm_ts)
@@ -612,9 +623,38 @@ def get_dummy_result():
     }
 
 
+def publish_result(base_url, token=''):
+    path = os.path.join(tempfile.gettempdir(), 'betman-publish.json')
+    dump_result(path)
+    with open(path, encoding='utf-8') as fh:
+        payload = json.load(fh)
+    if payload.get('error') and not payload.get('matches'):
+        raise SystemExit(payload['error'])
+    body = json.dumps(payload, ensure_ascii=False).encode('utf-8')
+    req = urllib.request.Request(
+        base_url.rstrip('/') + '/api/push',
+        data=body,
+        headers={
+            'Content-Type': 'application/json;charset=UTF-8',
+            'X-Push-Token': token or '',
+        },
+        method='POST',
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            print(resp.read().decode('utf-8'), flush=True)
+    except urllib.error.HTTPError as exc:
+        print(exc.read().decode('utf-8', errors='replace'), flush=True)
+        raise SystemExit(exc.code)
+
+
 if __name__ == '__main__':
     if len(sys.argv) >= 3 and sys.argv[1] == '--dump':
         dump_result(sys.argv[2])
+        raise SystemExit(0)
+    if len(sys.argv) >= 3 and sys.argv[1] == '--publish':
+        token = sys.argv[3] if len(sys.argv) > 3 else os.environ.get('PUSH_TOKEN', '')
+        publish_result(sys.argv[2], token)
         raise SystemExit(0)
     result = fetch_betman_data(force=True)
     print(f"회차: {result['round_info']}")
