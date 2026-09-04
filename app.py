@@ -297,6 +297,24 @@ HTML_TEMPLATE = """
             border: 1px solid rgba(255, 82, 82, 0.28);
         }
 
+        .pts-plus-badge, .pts-minus-badge {
+            display: inline-block;
+            padding: 4px 10px;
+            border-radius: 8px;
+            font-size: 0.74rem;
+            font-weight: 700;
+        }
+        .pts-plus-badge {
+            background: rgba(0, 210, 255, 0.16);
+            color: #4fc3f7;
+            border: 1px solid rgba(0, 210, 255, 0.28);
+        }
+        .pts-minus-badge {
+            background: rgba(255, 171, 64, 0.16);
+            color: #ffb74d;
+            border: 1px solid rgba(255, 171, 64, 0.28);
+        }
+
         .pts-norm-badge {
             display: inline-block;
             padding: 4px 10px;
@@ -501,7 +519,7 @@ HTML_TEMPLATE = """
         <div class="card-list" id="matchCards"></div>
 
         <div class="refresh-notice">
-            배당·승점·순위는 FotMob 참고 값입니다. 베트맨 공식 배당이 아니며, 승점차이는 이번 일정 전체 표준과 비교합니다.
+            배당·승점·순위는 FotMob 참고 값입니다. 승점차이는 이번에 올라온 경기에서 같은 승점차의 평균 배당과 비교해, 편차가 ±로 큰 경기만 보여 줍니다.
         </div>
     </div>
 
@@ -546,6 +564,11 @@ HTML_TEMPLATE = """
             return Math.sqrt(variance);
         }
 
+        function mean(values) {
+            if (!values.length) return 0;
+            return values.reduce((a, b) => a + b, 0) / values.length;
+        }
+
         function annotatePts(matches) {
             const samples = [];
             matches.forEach(m => {
@@ -561,34 +584,35 @@ HTML_TEMPLATE = """
                 m.pts_signal = '';
                 if (m.pts_diff !== null && m.odds_gap !== null) samples.push(m);
             });
-            const markOpposite = (m) => (
-                m.pts_diff * m.odds_gap < 0 &&
-                Math.abs(m.pts_diff) >= 3 &&
-                Math.abs(m.odds_gap) >= 0.15
-            );
-            if (samples.length < 4) {
-                samples.forEach(m => {
-                    if (markOpposite(m)) {
-                        m.pts_outlier = true;
-                        m.pts_signal = '승점·배당 반대';
-                    }
-                });
-                return;
-            }
+            if (samples.length < 5) return;
+
             const xs = samples.map(m => m.pts_diff);
             const ys = samples.map(m => m.odds_gap);
             const fit = linReg(xs, ys);
-            const residuals = samples.map(m => m.odds_gap - (fit.slope * m.pts_diff + fit.intercept));
-            const threshold = Math.max(0.35, 0.9 * (stdev(residuals) || 0.4));
-            samples.forEach((m, i) => {
-                m.pts_expected_gap = +(fit.slope * m.pts_diff + fit.intercept).toFixed(2);
-                m.pts_residual = +residuals[i].toFixed(2);
-                const opposite = markOpposite(m);
-                m.pts_outlier = opposite || Math.abs(residuals[i]) >= threshold;
-                if (opposite) m.pts_signal = '승점·배당 반대';
-                else if (!m.pts_outlier) m.pts_signal = '표준';
-                else if (residuals[i] > 0) m.pts_signal = '배당 홈우세 과대';
-                else m.pts_signal = '배당 홈우세 과소';
+
+            samples.forEach(m => {
+                const near = samples.filter(other => (
+                    other !== m && Math.abs(other.pts_diff - m.pts_diff) <= 3
+                ));
+                const expected = near.length >= 3
+                    ? mean(near.map(other => other.odds_gap))
+                    : (fit.slope * m.pts_diff + fit.intercept);
+                m.pts_expected_gap = +expected.toFixed(2);
+                m.pts_residual = +(m.odds_gap - expected).toFixed(2);
+            });
+
+            const residuals = samples.map(m => m.pts_residual);
+            const sigma = stdev(residuals) || 0.4;
+            const threshold = Math.max(0.45, sigma);
+            samples.forEach(m => {
+                m.pts_outlier = Math.abs(m.pts_residual) >= threshold;
+                if (!m.pts_outlier) {
+                    m.pts_signal = '';
+                } else if (m.pts_residual > 0) {
+                    m.pts_signal = '+편차 홈우세 과대';
+                } else {
+                    m.pts_signal = '-편차 원정우세 과대';
+                }
             });
         }
 
@@ -597,15 +621,22 @@ HTML_TEMPLATE = """
                 return '<span class="h2h-none">-</span>';
             }
             const diffText = (m.pts_diff > 0 ? '+' : '') + m.pts_diff + '점';
-            const cls = m.pts_outlier ? 'pts-hot-badge' : 'pts-norm-badge';
+            let cls = 'pts-norm-badge';
+            if (m.pts_outlier && m.pts_residual > 0) cls = 'pts-plus-badge';
+            else if (m.pts_outlier && m.pts_residual < 0) cls = 'pts-minus-badge';
+            else if (m.pts_outlier) cls = 'pts-hot-badge';
+            const avg = m.pts_expected_gap == null
+                ? ''
+                : `평균 ${(m.pts_expected_gap > 0 ? '+' : '') + m.pts_expected_gap}`;
             const resid = m.pts_residual == null
                 ? ''
-                : ` · 괴리 ${(m.pts_residual > 0 ? '+' : '') + m.pts_residual}`;
+                : `편차 ${(m.pts_residual > 0 ? '+' : '') + m.pts_residual}`;
+            const detail = [avg, resid].filter(Boolean).join(' · ');
             const signal = (m.pts_outlier && m.pts_signal)
                 ? `<div class="h2h-form">${escapeHtml(m.pts_signal)}</div>`
                 : '';
             return `<span class="${cls}">${diffText}</span>` +
-                `<div class="h2h-form">${m.home_pts}-${m.away_pts}${resid}</div>` +
+                `<div class="h2h-form">${m.home_pts}-${m.away_pts}${detail ? ' · ' + detail : ''}</div>` +
                 signal;
         }
 
@@ -724,7 +755,7 @@ HTML_TEMPLATE = """
             }
             if (!rows.length) {
                 const emptyMsg = currentLeague === 'pts'
-                    ? '승점 대비 배당 간격이 표준에서 벗어난 경기가 없습니다. 승점 수집 후 다시 올려 주세요.'
+                    ? '같은 승점차의 평균 배당 대비 편차가 큰 경기가 없습니다.'
                     : '표시할 축구 승무패 경기가 없습니다.';
                 setStatus(`
                     <div class="no-data">
@@ -892,7 +923,33 @@ def _empty_payload(pending=True, error=None):
 
 
 def _full_payload(data):
+    from scraper import PROTO_FOTMOB_LEAGUE_IDS
+
     matches = data.get('matches') or []
+    # 캐시에 남은 주변 리그(노르웨이·사우디 등)는 화면에서 제외
+    filtered = []
+    for m in matches:
+        lid = m.get('fotmob_league_id')
+        try:
+            lid = int(lid) if lid is not None and lid != '' else None
+        except (TypeError, ValueError):
+            lid = None
+        if lid is not None and lid not in PROTO_FOTMOB_LEAGUE_IDS:
+            continue
+        league = str(m.get('league') or '')
+        if league in (
+            '사우디', '분데스2', '포르투갈', '리그2', '세리에B', '라리가2',
+            '스코틀랜드', '벨기에', '노르웨이', '스웨덴', '덴마크', '중초',
+            '아르헨티나', '브라질', '리가MX',
+        ):
+            continue
+        filtered.append(m)
+    matches = filtered
+    matches.sort(key=lambda m: (
+        str(m.get('date') or ''),
+        str(m.get('league') or ''),
+        str(m.get('home') or ''),
+    ))
     leagues = list(dict.fromkeys(m['league'] for m in matches))
     return {
         'ready': True,

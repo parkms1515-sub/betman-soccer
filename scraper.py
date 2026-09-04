@@ -519,7 +519,23 @@ FOTMOB_LEAGUE_LABELS = {
     73: 'UEL',
 }
 
-FOTMOB_ODDS_LEAGUE_IDS = {league_id for league_id, _hints in FOTMOB_LEAGUE_HINTS}
+# 스포츠토토 프로토 승부식에 자주 편성되는 리그만 수집.
+# 사우디·분데스2·포르투갈·기타 2부/주변 리그는 제외.
+PROTO_FOTMOB_LEAGUE_IDS = frozenset({
+    9080, 9116,  # K리그1/2
+    223, 8974,   # J리그1/2
+    47, 48,      # EPL / Championship
+    87,          # 라리가
+    54,          # 분데스 1부
+    55,          # 세리에A
+    53,          # 리그앙
+    57,          # 에레디비시
+    113,         # A리그
+    130,         # MLS
+    42, 73,      # UCL / UEL
+})
+
+FOTMOB_ODDS_LEAGUE_IDS = PROTO_FOTMOB_LEAGUE_IDS
 
 TEAM_HINTS = (
     ('맨체스터시티', 'manchester city'),
@@ -967,7 +983,17 @@ def _collect_fotmob_fixtures():
     return fixtures
 
 
+def _sort_matches(matches):
+    matches.sort(key=lambda m: (
+        str(m.get('date') or ''),
+        str(m.get('league') or ''),
+        str(m.get('home') or ''),
+    ))
+    return matches
+
+
 def _fotmob_payload(matches, h2h_ready=False):
+    _sort_matches(matches)
     if matches:
         round_info = f"{matches[0]['date'].split()[0]}~{matches[-1]['date'].split()[0]}"
         sale_end = matches[-1]['date']
