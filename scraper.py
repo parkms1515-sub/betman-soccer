@@ -613,7 +613,7 @@ TEAM_HINTS = (
     ('이랜드', 'eland'),
 )
 
-_FOTMOB = {'catalog': None, 'tables': {}}
+_FOTMOB = {'catalog': None, 'tables': {}, 'leagues': {}}
 
 
 def _fotmob_get(url, params=None):
@@ -739,23 +739,32 @@ def _extract_fotmob_rows(data):
     return ordered
 
 
-def _fotmob_table(league_id):
-    cached = _FOTMOB['tables'].get(league_id)
+def _fotmob_league(league_id):
+    cached = _FOTMOB['leagues'].get(league_id)
     if cached is not None:
         return cached
     try:
         data = _fotmob_get(f'https://www.fotmob.com/api/data/leagues?id={league_id}') or {}
-        rows = _extract_fotmob_rows(data)
         print(
             f"[FOTMOB] {league_id} {(data.get('details') or {}).get('name') or ''} "
-            f"{len(rows)}팀",
+            f"일정 {len(((data.get('fixtures') or {}).get('allMatches') or []))}경기",
             flush=True,
         )
     except Exception as exc:
         print(f'[FOTMOB] 리그 {league_id} 실패: {exc}', flush=True)
-        rows = []
+        data = {}
+    _FOTMOB['leagues'][league_id] = data
+    rows = _extract_fotmob_rows(data)
     _FOTMOB['tables'][league_id] = rows
-    return rows
+    return data
+
+
+def _fotmob_table(league_id):
+    cached = _FOTMOB['tables'].get(league_id)
+    if cached is not None:
+        return cached
+    _fotmob_league(league_id)
+    return _FOTMOB['tables'].get(league_id) or []
 
 
 def _score_team(betman_name, row):
@@ -928,56 +937,58 @@ def _decorate_odds(home, away, win_allot, draw_allot, lose_allot, w_pct=0.0, d_p
 
 def _fotmob_days():
     try:
-        return max(1, min(8, int(os.environ.get('FOTMOB_DAYS') or 5)))
+        return max(1, min(10, int(os.environ.get('FOTMOB_DAYS') or 7)))
     except (TypeError, ValueError):
-        return 5
+        return 7
+
+
+def _team_name(team):
+    team = team or {}
+    return team.get('name') or team.get('longName') or team.get('shortName') or ''
 
 
 def _collect_fotmob_fixtures():
+    """리그 일정 API로 수집합니다. 일별 피드는 시즌 ID가 달라 K리그1·J리그 등이 빠집니다."""
     days = _fotmob_days()
-    start = datetime.now(KST).date()
+    start = datetime.now(KST)
+    end = start + timedelta(days=days)
     fixtures = []
     seen = set()
-    for offset in range(days):
-        day = (start + timedelta(days=offset)).strftime('%Y%m%d')
-        try:
-            payload = _fotmob_get(f'https://www.fotmob.com/api/data/matches?date={day}')
-        except Exception as exc:
-            print(f'[FOTMOB] matches {day} 실패: {exc}', flush=True)
-            continue
-        for league in (payload or {}).get('leagues') or []:
-            try:
-                league_id = int(league.get('id') or 0)
-            except (TypeError, ValueError):
+    for league_id in sorted(FOTMOB_ODDS_LEAGUE_IDS):
+        time.sleep(0.08)
+        data = _fotmob_league(league_id)
+        details = data.get('details') or {}
+        league_name = _league_label(league_id, details.get('name') or '')
+        raw_matches = ((data.get('fixtures') or {}).get('allMatches') or [])
+        kept = 0
+        for raw in raw_matches:
+            status = raw.get('status') or {}
+            if status.get('cancelled') or status.get('finished') or status.get('started'):
                 continue
-            if league_id not in FOTMOB_ODDS_LEAGUE_IDS:
+            utc = status.get('utcTime')
+            date_text, local_dt = _format_kst(utc)
+            if not local_dt or local_dt < start - timedelta(minutes=20) or local_dt > end:
                 continue
-            league_name = _league_label(league_id, league.get('name') or '')
-            for raw in league.get('matches') or []:
-                status = raw.get('status') or {}
-                if status.get('cancelled') or status.get('finished') or status.get('started'):
-                    continue
-                match_id = raw.get('id')
-                if not match_id or match_id in seen:
-                    continue
-                seen.add(match_id)
-                home = (raw.get('home') or {}).get('name') or (raw.get('home') or {}).get('longName') or ''
-                away = (raw.get('away') or {}).get('name') or (raw.get('away') or {}).get('longName') or ''
-                utc = status.get('utcTime') or raw.get('time')
-                date_text, local_dt = _format_kst(utc)
-                fixtures.append({
-                    'match_id': match_id,
-                    'league_id': league_id,
-                    'league': league_name,
-                    'home_raw': home,
-                    'away_raw': away,
-                    'home_id': str((raw.get('home') or {}).get('id') or ''),
-                    'away_id': str((raw.get('away') or {}).get('id') or ''),
-                    'date': date_text,
-                    'kickoff': local_dt,
-                    'utc': utc,
-                })
-        time.sleep(0.06)
+            match_id = raw.get('id')
+            if not match_id or match_id in seen:
+                continue
+            seen.add(match_id)
+            home = raw.get('home') or {}
+            away = raw.get('away') or {}
+            fixtures.append({
+                'match_id': match_id,
+                'league_id': league_id,
+                'league': league_name,
+                'home_raw': _team_name(home),
+                'away_raw': _team_name(away),
+                'home_id': str(home.get('id') or ''),
+                'away_id': str(away.get('id') or ''),
+                'date': date_text,
+                'kickoff': local_dt,
+                'utc': utc,
+            })
+            kept += 1
+        print(f'[FOTMOB] {league_name} {kept}경기/{days}일', flush=True)
     fixtures.sort(key=lambda item: item.get('kickoff') or datetime.max.replace(tzinfo=KST))
     print(f'[FOTMOB] 일정 {days}일 {len(fixtures)}경기', flush=True)
     return fixtures
