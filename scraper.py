@@ -34,6 +34,118 @@ def _chromium_args():
     return args
 
 
+JSON_HEADERS = {
+    'Content-Type': 'application/json;charset=UTF-8',
+    'Accept': 'application/json, text/javascript, */*; q=0.01',
+    'X-Requested-With': 'XMLHttpRequest',
+    'Origin': 'https://www.betman.co.kr',
+}
+
+
+def _new_page(browser):
+    context = browser.new_context(
+        ignore_https_errors=True,
+        user_agent=(
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+            '(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36'
+        ),
+        viewport={'width': 1400, 'height': 900},
+        locale='ko-KR',
+    )
+    return context.new_page()
+
+
+def _post_json(page, url, payload, referer):
+    headers = dict(JSON_HEADERS)
+    headers['Referer'] = referer
+    resp = page.request.post(
+        url,
+        data=json.dumps(payload),
+        headers=headers,
+        timeout=20000,
+    )
+    print(f'[SCRAPE] POST {url} -> {resp.status}', flush=True)
+    if resp.status != 200:
+        raise RuntimeError(f'{url} HTTP {resp.status}')
+    try:
+        return resp.json()
+    except Exception as exc:
+        raise RuntimeError(f'{url} JSON 파싱 실패: {exc}') from exc
+
+
+def _warmup_betman(page):
+    """무거운 HTML 렌더 대신 가벼운 요청으로 세션만 엽니다."""
+    last_err = None
+    for url in (
+        'https://www.betman.co.kr/',
+        'https://www.betman.co.kr/main/mainPage/gamebuy/proto.do',
+    ):
+        try:
+            resp = page.request.get(url, timeout=15000)
+            print(f'[SCRAPE] GET {url} -> {resp.status}', flush=True)
+            if resp.status < 500:
+                return
+        except Exception as exc:
+            last_err = exc
+            print(f'[SCRAPE] GET 실패 {url}: {exc}', flush=True)
+        try:
+            page.goto(url, timeout=20000, wait_until='commit')
+            print(f'[SCRAPE] goto commit {url} ok', flush=True)
+            return
+        except Exception as exc:
+            last_err = exc
+            print(f'[SCRAPE] goto 실패 {url}: {exc}', flush=True)
+    raise RuntimeError(
+        'Render 서버에서 베트맨(betman.co.kr)에 접속하지 못했습니다. '
+        '해외 클라우드 IP가 차단된 경우가 많습니다. '
+        f'상세: {last_err}'
+    ) from last_err
+
+
+def _fetch_round_ts(page):
+    payload = {'_sbmInfo': {'_sbmInfo': {'debugMode': 'false'}}}
+    referer = 'https://www.betman.co.kr/main/mainPage/gamebuy/proto.do'
+    for url in (
+        'https://www.betman.co.kr/buyPsblGame/inqCacheBuyAbleGameInfoList.do',
+        'https://www.betman.co.kr/main/mainPage/gamebuy/inqCacheBuyAbleGameInfoList.do',
+    ):
+        try:
+            data = _post_json(page, url, payload, referer)
+            for game in data.get('protoGames') or []:
+                if game.get('gmId') == 'G101' and game.get('gmTs'):
+                    print(f'[SCRAPE] gmTs {game.get("gmTs")}', flush=True)
+                    return game.get('gmTs')
+        except Exception as exc:
+            print(f'[SCRAPE] 회차 조회 실패 {url}: {exc}', flush=True)
+    return 260105
+
+
+def _fetch_game_info(page, gm_ts):
+    payload = {
+        'gmId': 'G101',
+        'gmTs': gm_ts,
+        'gameYear': '',
+        '_sbmInfo': {'_sbmInfo': {'debugMode': 'false'}},
+    }
+    referer = (
+        f'https://www.betman.co.kr/main/mainPage/gamebuy/gameSlip.do?gmId=G101&gmTs={gm_ts}'
+    )
+    last_err = None
+    for url in (
+        'https://www.betman.co.kr/buyPsblGame/gameInfoInq.do',
+        'https://www.betman.co.kr/main/mainPage/gamebuy/gameInfoInq.do',
+    ):
+        try:
+            data = _post_json(page, url, payload, referer)
+            if data.get('compSchedules'):
+                return data
+            last_err = RuntimeError(f'{url}에 compSchedules 없음')
+        except Exception as exc:
+            last_err = exc
+            print(f'[SCRAPE] gameInfo 실패 {url}: {exc}', flush=True)
+    raise RuntimeError(f'배당 API를 받지 못했습니다: {last_err}') from last_err
+
+
 def fetch_betman_data(force=False):
     """
     프로토 승부식 축구 승무패 배당률을 수집합니다.
@@ -60,74 +172,23 @@ def fetch_betman_data(force=False):
 
 
 def _scrape_odds():
-    game_data = {}
-    buy_data = {}
-
-    def handle_response(response):
-        url = response.url
-        try:
-            if 'inqCacheBuyAbleGameInfoList.do' in url:
-                buy_data.update(response.json())
-            elif 'gameInfoInq.do' in url and 'Asis' not in url:
-                game_data.update(response.json())
-        except Exception:
-            pass
-
     p = sync_playwright().start()
     browser = None
     result = None
     try:
         print('[SCRAPE] chromium launch', flush=True)
         browser = p.chromium.launch(headless=True, args=_chromium_args())
-        page = browser.new_page(
-            user_agent=(
-                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
-                '(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36'
-            ),
-            viewport={'width': 1400, 'height': 900},
-        )
-        page.on('response', handle_response)
-
-        print('[SCRAPE] goto proto.do', flush=True)
-        page.goto(
-            'https://www.betman.co.kr/main/mainPage/gamebuy/proto.do',
-            timeout=60000,
-            wait_until='domcontentloaded',
-        )
-        page.wait_for_timeout(2500)
-
-        gm_ts = None
-        for game in buy_data.get('protoGames', []):
-            if game.get('gmId') == 'G101':
-                gm_ts = game.get('gmTs')
-                break
-        if not gm_ts:
-            gm_ts = 260105
-
-        try:
-            with page.expect_response(
-                lambda r: 'gameInfoInq.do' in r.url and 'Asis' not in r.url,
-                timeout=25000,
-            ):
-                page.goto(
-                    f'https://www.betman.co.kr/main/mainPage/gamebuy/gameSlip.do?gmId=G101&gmTs={gm_ts}',
-                    timeout=60000,
-                    wait_until='domcontentloaded',
-                )
-            page.wait_for_timeout(500)
-        except Exception:
-            page.wait_for_timeout(6000)
-
-        if not game_data.get('compSchedules'):
-            print('[ERROR] 베트맨 API 응답을 받지 못했습니다.')
-            result = get_dummy_result()
-        else:
-            result = parse_game_data(game_data)
-            result['cached'] = False
-            result['h2h_ready'] = False
-            result['gm_ts'] = game_data.get('gmTs') or gm_ts
-            _CACHE['data'] = result
-            _CACHE['ts'] = time.time()
+        page = _new_page(browser)
+        _warmup_betman(page)
+        gm_ts = _fetch_round_ts(page)
+        game_data = _fetch_game_info(page, gm_ts)
+        result = parse_game_data(game_data)
+        result['cached'] = False
+        result['h2h_ready'] = False
+        result['gm_ts'] = game_data.get('gmTs') or gm_ts
+        _CACHE['data'] = result
+        _CACHE['ts'] = time.time()
+        print(f'[SCRAPE] matches {len(result.get("matches") or [])}', flush=True)
     finally:
         if browser:
             try:
@@ -147,13 +208,8 @@ def _run_h2h_sync(result):
     browser = None
     try:
         browser = p.chromium.launch(headless=True, args=_chromium_args())
-        page = browser.new_page()
-        page.goto(
-            f'https://www.betman.co.kr/main/mainPage/gamebuy/gameSlip.do?gmId=G101&gmTs={gm_ts}',
-            timeout=60000,
-            wait_until='domcontentloaded',
-        )
-        page.wait_for_timeout(1500)
+        page = _new_page(browser)
+        _warmup_betman(page)
         _attach_h2h_streaks(page, matches, gm_ts)
         result['h2h_ready'] = True
     except Exception as exc:
