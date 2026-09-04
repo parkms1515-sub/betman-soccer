@@ -5,12 +5,32 @@ Playwright로 실제 브라우저 접속 후 gameInfoInq.do API 응답을 가로
 from playwright.sync_api import sync_playwright
 from datetime import datetime
 import json
+import os
+import threading
 import time
 
 CACHE_TTL_SEC = 180
 H2H_CACHE_TTL_SEC = 3600
 _CACHE = {'data': None, 'ts': 0.0}
 _H2H_CACHE = {}
+_SCRAPE_LOCK = threading.Lock()
+_H2H_GEN = 0
+
+
+def _chromium_args():
+    args = [
+        '--no-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-gpu',
+        '--disable-software-rasterizer',
+        '--disable-extensions',
+        '--disable-background-networking',
+        '--mute-audio',
+        '--no-first-run',
+    ]
+    if os.environ.get('RENDER') or os.environ.get('LOW_MEMORY') == '1':
+        args.extend(['--single-process', '--no-zygote'])
+    return args
 
 
 def fetch_betman_data(force=False):
@@ -26,6 +46,16 @@ def fetch_betman_data(force=False):
         cached['cached'] = True
         return cached
 
+    with _SCRAPE_LOCK:
+        now = time.time()
+        if not force and _CACHE['data'] and (now - _CACHE['ts']) < CACHE_TTL_SEC:
+            cached = dict(_CACHE['data'])
+            cached['cached'] = True
+            return cached
+        return _scrape_odds()
+
+
+def _scrape_odds():
     game_data = {}
     buy_data = {}
 
@@ -40,15 +70,10 @@ def fetch_betman_data(force=False):
             pass
 
     p = sync_playwright().start()
+    browser = None
+    result = None
     try:
-        browser = p.chromium.launch(
-            headless=True,
-            args=[
-                '--no-sandbox',
-                '--disable-dev-shm-usage',
-                '--disable-gpu',
-            ],
-        )
+        browser = p.chromium.launch(headless=True, args=_chromium_args())
         page = browser.new_page()
         page.on('response', handle_response)
 
@@ -56,7 +81,7 @@ def fetch_betman_data(force=False):
             'https://www.betman.co.kr/main/mainPage/gamebuy/proto.do',
             timeout=30000,
         )
-        page.wait_for_timeout(4000)
+        page.wait_for_timeout(2500)
 
         gm_ts = None
         for game in buy_data.get('protoGames', []):
@@ -75,30 +100,72 @@ def fetch_betman_data(force=False):
                     f'https://www.betman.co.kr/main/mainPage/gamebuy/gameSlip.do?gmId=G101&gmTs={gm_ts}',
                     timeout=30000,
                 )
-            page.wait_for_timeout(800)
+            page.wait_for_timeout(500)
         except Exception:
-            page.wait_for_timeout(8000)
+            page.wait_for_timeout(6000)
 
         if not game_data.get('compSchedules'):
             print('[ERROR] 베트맨 API 응답을 받지 못했습니다.')
-            return get_dummy_result()
-
-        result = parse_game_data(game_data)
-        try:
-            _attach_h2h_streaks(page, result['matches'], game_data.get('gmTs') or gm_ts)
-        except Exception as exc:
-            print('[WARN] 상대전적 수집 실패:', exc)
-            for match in result['matches']:
-                match.update(_empty_h2h())
-        result['cached'] = False
-        _CACHE['data'] = result
-        _CACHE['ts'] = time.time()
-        return result
+            result = get_dummy_result()
+        else:
+            result = parse_game_data(game_data)
+            result['cached'] = False
+            result['h2h_ready'] = False
+            result['gm_ts'] = game_data.get('gmTs') or gm_ts
+            _CACHE['data'] = result
+            _CACHE['ts'] = time.time()
     finally:
-        try:
-            browser.close()
-        except Exception:
-            pass
+        if browser:
+            try:
+                browser.close()
+            except Exception:
+                pass
+        p.stop()
+
+    if result and not result.get('h2h_ready'):
+        _start_h2h_thread(result)
+    return result or get_dummy_result()
+
+
+def _start_h2h_thread(result):
+    global _H2H_GEN
+    _H2H_GEN += 1
+    gen = _H2H_GEN
+    thread = threading.Thread(
+        target=_h2h_worker,
+        args=(gen, result),
+        daemon=True,
+    )
+    thread.start()
+
+
+def _h2h_worker(gen, result):
+    """배당 응답 후에 상대전적만 따로 채웁니다. 헬스체크를 막지 않습니다."""
+    gm_ts = result.get('gm_ts') or 260105
+    matches = result.get('matches') or []
+    p = sync_playwright().start()
+    browser = None
+    try:
+        browser = p.chromium.launch(headless=True, args=_chromium_args())
+        page = browser.new_page()
+        page.goto(
+            f'https://www.betman.co.kr/main/mainPage/gamebuy/gameSlip.do?gmId=G101&gmTs={gm_ts}',
+            timeout=30000,
+        )
+        page.wait_for_timeout(1500)
+        if gen != _H2H_GEN:
+            return
+        _attach_h2h_streaks(page, matches, gm_ts)
+        if gen == _H2H_GEN:
+            result['h2h_ready'] = True
+    except Exception as exc:
+        print('[WARN] 상대전적 백그라운드 수집 실패:', exc)
+    finally:
+        if browser:
+            try:
+                browser.close()
+            except Exception:
+                pass
         p.stop()
 
 
@@ -420,6 +487,7 @@ def get_dummy_result():
         'round_info': '테스트',
         'sale_end': '데이터 없음',
         'cached': False,
+        'h2h_ready': True,
         'matches': [
             {
                 'date': '09/06 19:00', 'league': 'K리그1', 'home': '울산HD', 'away': 'FC서울',

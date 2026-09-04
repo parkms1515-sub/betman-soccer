@@ -411,6 +411,9 @@ HTML_TEMPLATE = """
             return 'league-default';
         }
 
+        let h2hReady = false;
+        let h2hPollTimer = null;
+
         function h2hCell(m) {
             const form = m.h2h_form
                 ? `<div class="h2h-form">${escapeHtml(m.h2h_form)}</div>`
@@ -419,7 +422,13 @@ HTML_TEMPLATE = """
                 const cls = m.h2h_side === '홈' ? 'h2h-home' : 'h2h-away';
                 return `<span class="h2h-streak ${cls}">✓ ${escapeHtml(m.h2h_team)} ${m.h2h_streak}연승</span>${form}`;
             }
-            return `<span class="h2h-none">${m.h2h_form ? escapeHtml(m.h2h_form) : '-'}</span>`;
+            if (m.h2h_form) {
+                return `<span class="h2h-none">${escapeHtml(m.h2h_form)}</span>`;
+            }
+            if (!h2hReady) {
+                return '<span class="h2h-none">조회중</span>';
+            }
+            return '<span class="h2h-none">-</span>';
         }
 
         function favClass(side) {
@@ -510,17 +519,50 @@ HTML_TEMPLATE = """
             document.getElementById('homeFavCount').textContent = data.home_fav_count ?? 0;
             document.getElementById('awayFavCount').textContent = data.away_fav_count ?? 0;
             document.getElementById('h2hStreakCount').textContent = data.h2h_streak_count ?? 0;
+            h2hReady = !!data.h2h_ready;
             renderFilters(data.leagues || []);
             renderRows();
+            if (!h2hReady) scheduleH2hPoll();
+        }
+
+        function scheduleH2hPoll() {
+            if (h2hPollTimer) return;
+            let tries = 0;
+            h2hPollTimer = setInterval(async () => {
+                tries += 1;
+                if (tries > 20) {
+                    clearInterval(h2hPollTimer);
+                    h2hPollTimer = null;
+                    h2hReady = true;
+                    renderRows();
+                    return;
+                }
+                try {
+                    const res = await fetch('/api/data');
+                    if (!res.ok) return;
+                    const data = await res.json();
+                    applyData(data);
+                    if (data.h2h_ready) {
+                        clearInterval(h2hPollTimer);
+                        h2hPollTimer = null;
+                    }
+                } catch (err) {
+                    /* keep polling */
+                }
+            }, 3000);
         }
 
         async function loadData(force) {
+            if (h2hPollTimer) {
+                clearInterval(h2hPollTimer);
+                h2hPollTimer = null;
+            }
             const body = document.getElementById('matchBody');
             body.innerHTML = `
                 <tr><td colspan="11">
                     <div class="loading">
                         <div class="spinner"></div>
-                        <div>${force ? '최신 배당과 상대전적을 다시 수집하는 중...' : '베트맨에서 배당과 상대전적을 가져오는 중입니다. 첫 수집은 조금 더 걸릴 수 있습니다.'}</div>
+                        <div>${force ? '최신 배당을 다시 수집하는 중...' : '베트맨에서 최신 배당을 가져오는 중입니다. 약 15초 걸릴 수 있습니다.'}</div>
                     </div>
                 </td></tr>`;
             try {
@@ -573,6 +615,7 @@ def _payload(force=False):
         'home_fav_count': sum(1 for m in matches if m.get('fav_side') == '홈'),
         'away_fav_count': sum(1 for m in matches if m.get('fav_side') == '원정'),
         'h2h_streak_count': sum(1 for m in matches if m.get('h2h_checked')),
+        'h2h_ready': bool(data.get('h2h_ready')),
     }
 
 
