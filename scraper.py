@@ -9,6 +9,7 @@ import os
 import sys
 import threading
 import time
+import traceback
 
 CACHE_TTL_SEC = 180
 H2H_CACHE_TTL_SEC = 3600
@@ -76,13 +77,22 @@ def _scrape_odds():
     browser = None
     result = None
     try:
+        print('[SCRAPE] chromium launch', flush=True)
         browser = p.chromium.launch(headless=True, args=_chromium_args())
-        page = browser.new_page()
+        page = browser.new_page(
+            user_agent=(
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+                '(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36'
+            ),
+            viewport={'width': 1400, 'height': 900},
+        )
         page.on('response', handle_response)
 
+        print('[SCRAPE] goto proto.do', flush=True)
         page.goto(
             'https://www.betman.co.kr/main/mainPage/gamebuy/proto.do',
-            timeout=30000,
+            timeout=60000,
+            wait_until='domcontentloaded',
         )
         page.wait_for_timeout(2500)
 
@@ -101,7 +111,8 @@ def _scrape_odds():
             ):
                 page.goto(
                     f'https://www.betman.co.kr/main/mainPage/gamebuy/gameSlip.do?gmId=G101&gmTs={gm_ts}',
-                    timeout=30000,
+                    timeout=60000,
+                    wait_until='domcontentloaded',
                 )
             page.wait_for_timeout(500)
         except Exception:
@@ -139,7 +150,8 @@ def _run_h2h_sync(result):
         page = browser.new_page()
         page.goto(
             f'https://www.betman.co.kr/main/mainPage/gamebuy/gameSlip.do?gmId=G101&gmTs={gm_ts}',
-            timeout=30000,
+            timeout=60000,
+            wait_until='domcontentloaded',
         )
         page.wait_for_timeout(1500)
         _attach_h2h_streaks(page, matches, gm_ts)
@@ -165,14 +177,25 @@ def _atomic_write_json(path, data):
 
 def dump_result(path):
     """별도 프로세스에서 배당을 먼저 저장한 뒤 상대전적을 이어 씁니다."""
-    result = _scrape_odds()
-    _atomic_write_json(path, result)
-    print(f'[DUMP] odds {len(result.get("matches") or [])}건 저장', flush=True)
-    if result.get('matches') and not result.get('h2h_ready'):
-        _run_h2h_sync(result)
+    try:
+        result = _scrape_odds()
         _atomic_write_json(path, result)
-        print('[DUMP] h2h 저장', flush=True)
-    return result
+        print(f'[DUMP] odds {len(result.get("matches") or [])}건 저장', flush=True)
+        if result.get('matches') and not result.get('h2h_ready'):
+            _run_h2h_sync(result)
+            _atomic_write_json(path, result)
+            print('[DUMP] h2h 저장', flush=True)
+        return result
+    except Exception as exc:
+        tb = traceback.format_exc()
+        print(tb, flush=True)
+        _atomic_write_json(path, {
+            'matches': [],
+            'error': str(exc),
+            'h2h_ready': True,
+            'cached': False,
+        })
+        raise SystemExit(1)
 
 
 def _safe_float(value):

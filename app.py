@@ -595,11 +595,13 @@ HTML_TEMPLATE = """
                 }
                 throw new Error('timeout');
             } catch (err) {
+                const detail = err && err.message ? String(err.message) : '';
                 body.innerHTML = `
                     <tr><td colspan="11">
                         <div class="no-data">
                             <div class="icon">⚠️</div>
                             <div>데이터를 불러오지 못했습니다. 새로고침을 다시 눌러 주세요.</div>
+                            <div class="h2h-form" style="margin-top:8px;white-space:normal;max-width:720px;margin-left:auto;margin-right:auto;">${escapeHtml(detail)}</div>
                         </div>
                     </td></tr>`;
             }
@@ -674,6 +676,10 @@ def _load_dump_file():
                 _STATE['data'] = data
                 _STATE['ts'] = time.time()
                 _STATE['error'] = None
+            return data
+        if data.get('error'):
+            with _STATE_LOCK:
+                _STATE['error'] = data.get('error')
             return data
     except Exception as exc:
         print('[JOB] dump read fail', exc, flush=True)
