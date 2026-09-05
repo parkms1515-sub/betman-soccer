@@ -8,13 +8,24 @@ import sys
 import tempfile
 import threading
 import time
+from datetime import datetime, timedelta, timezone
 
 from flask import Flask, render_template_string, jsonify, request
 
 app = Flask(__name__)
 
+KST = timezone(timedelta(hours=9))
 DUMP_PATH = os.path.join(tempfile.gettempdir(), 'betman.json')
-CACHE_TTL_SEC = 180
+
+
+def _cache_hours():
+    try:
+        return max(1, min(48, float(os.environ.get('CACHE_HOURS') or 12)))
+    except (TypeError, ValueError):
+        return 12
+
+
+CACHE_TTL_SEC = int(_cache_hours() * 3600)
 _STATE = {
     'data': None,
     'ts': 0.0,
@@ -522,7 +533,7 @@ HTML_TEMPLATE = """
         <div class="card-list" id="matchCards"></div>
 
         <div class="refresh-notice">
-            배당·승점·순위는 FotMob 참고 값입니다. 승점차이는 이번에 올라온 경기에서 같은 승점차의 평균 배당과 비교해, 편차가 ±로 큰 경기만 보여 줍니다. 승점9점은 리그 최근 5경기 승점이 9점 이상인 팀입니다. 컵·친선은 넣지 않습니다.
+            배당은 12시간마다 한 번 모아 보여 줍니다. 실시간 배당이 아닙니다. 승점차이는 같은 승점차의 평균 배당과 비교한 편차입니다. 승점9점은 리그 최근 5경기(컵·친선 제외) 기준입니다.
         </div>
     </div>
 
@@ -881,8 +892,9 @@ HTML_TEMPLATE = """
             annotatePts(allMatches);
             document.getElementById('roundInfo').textContent = data.round_info || '-';
             document.getElementById('saleEnd').textContent = data.sale_end || '-';
-            const cacheTag = data.cached ? ' (캐시)' : '';
-            document.getElementById('fetchedAt').textContent = (data.fetched_at || '-') + cacheTag;
+            const cacheTag = data.cached ? ' (12시간 캐시)' : '';
+            const next = data.next_refresh ? ` · 다음 갱신 ${data.next_refresh}` : '';
+            document.getElementById('fetchedAt').textContent = (data.fetched_at || '-') + cacheTag + next;
             document.getElementById('matchCount').textContent = allMatches.length;
             document.getElementById('leagueCount').textContent = (data.leagues || []).length;
             document.getElementById('homeFavCount').textContent = data.home_fav_count ?? 0;
@@ -934,7 +946,7 @@ HTML_TEMPLATE = """
             setStatus(`
                     <div class="loading">
                         <div class="spinner"></div>
-                        <div>${force ? '최신 배당을 다시 수집하는 중...' : '데이터를 불러오는 중입니다. 휴대폰에서는 첫 로딩이 1~2분 걸릴 수 있습니다.'}</div>
+                        <div>${force ? '저장된 배당을 다시 읽는 중...' : '저장된 배당을 불러오는 중입니다. 12시간마다 한 번만 새로 수집하며, 그때만 1~2분 걸릴 수 있습니다.'}</div>
                     </div>`);
             try {
                 for (let i = 0; i < 90; i++) {
@@ -965,7 +977,7 @@ HTML_TEMPLATE = """
             const btn = event.target.closest('.filter-btn');
             if (!btn) return;
             if (btn.id === 'refreshBtn') {
-                loadData(true);
+                loadData(false);
                 return;
             }
             currentLeague = btn.dataset.league;
@@ -995,6 +1007,32 @@ def _blocked_message():
     )
 
 
+def _fetched_ts(data):
+    text = str((data or {}).get('fetched_at') or '').strip()
+    for fmt in ('%Y-%m-%d %H:%M:%S', '%Y-%m-%d %H:%M'):
+        try:
+            return datetime.strptime(text, fmt).replace(tzinfo=KST).timestamp()
+        except ValueError:
+            continue
+    return None
+
+
+def _is_fresh(data, fallback_ts=0):
+    if not (data or {}).get('matches'):
+        return False
+    ts = _fetched_ts(data) or fallback_ts or 0
+    if not ts:
+        return False
+    return (time.time() - ts) < CACHE_TTL_SEC
+
+
+def _next_refresh_text(data, fallback_ts=0):
+    ts = _fetched_ts(data) or fallback_ts or 0
+    if not ts:
+        return '-'
+    return datetime.fromtimestamp(ts + CACHE_TTL_SEC, KST).strftime('%m/%d %H:%M')
+
+
 def _empty_payload(pending=True, error=None):
     return {
         'ready': False,
@@ -1006,6 +1044,7 @@ def _empty_payload(pending=True, error=None):
         'sale_end': '-',
         'fetched_at': '-',
         'cached': False,
+        'next_refresh': '-',
         'home_fav_count': 0,
         'away_fav_count': 0,
         'h2h_streak_count': 0,
@@ -1049,6 +1088,7 @@ def _full_payload(data):
         'sale_end': data.get('sale_end', '-'),
         'fetched_at': data.get('fetched_at', '-'),
         'cached': data.get('cached', False),
+        'next_refresh': _next_refresh_text(data, _STATE.get('ts') or 0),
         'home_fav_count': sum(1 for m in matches if m.get('fav_side') == '홈'),
         'away_fav_count': sum(1 for m in matches if m.get('fav_side') == '원정'),
         'h2h_streak_count': sum(1 for m in matches if m.get('h2h_checked')),
@@ -1064,9 +1104,10 @@ def _load_dump_file():
         with open(DUMP_PATH, encoding='utf-8') as fh:
             data = json.load(fh)
         if data.get('matches'):
+            fetched = _fetched_ts(data) or time.time()
             with _STATE_LOCK:
                 _STATE['data'] = data
-                _STATE['ts'] = time.time()
+                _STATE['ts'] = fetched
                 _STATE['error'] = None
             return data
         if data.get('error'):
@@ -1133,10 +1174,10 @@ def _run_job():
 def _ensure_job(force=False):
     if _remote_scrape_blocked():
         return
-    now = time.time()
+    if not _STATE['data']:
+        _load_dump_file()
     with _STATE_LOCK:
-        fresh = _STATE['data'] and (now - _STATE['ts']) < CACHE_TTL_SEC
-        if not force and fresh:
+        if not force and _is_fresh(_STATE['data'], _STATE['ts']):
             return
         if _STATE['running']:
             return
@@ -1153,14 +1194,14 @@ def _ensure_job(force=False):
 
 
 def _payload(force=False):
-    _ensure_job(force=force)
+    _ensure_job(force=False)
     with _STATE_LOCK:
         data = _STATE['data']
         running = _STATE['running']
         error = _STATE['error']
     if data:
         payload = _full_payload(data)
-        payload['cached'] = (not running) and (not force)
+        payload['cached'] = (not running) and _is_fresh(data, _STATE['ts'])
         return payload
     if _remote_scrape_blocked():
         return _empty_payload(pending=False, error=_blocked_message())
@@ -1203,6 +1244,9 @@ def api_push():
 @app.route('/health')
 def health():
     return jsonify({'ok': True})
+
+
+_load_dump_file()
 
 
 if __name__ == '__main__':
