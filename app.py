@@ -287,6 +287,9 @@ HTML_TEMPLATE = """
 
         .h2h-none { color: #666; font-size: 0.78rem; }
         .h2h-form { font-size: 0.68rem; color: #777; margin-top: 3px; letter-spacing: 1px; }
+        .form5-lines { display: flex; flex-direction: column; gap: 6px; }
+        .form5-line { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+        .form5-marks { letter-spacing: 2px; font-weight: 700; font-size: 0.82rem; color: #ddd; }
 
         .pts-hot-badge {
             display: inline-block;
@@ -501,21 +504,7 @@ HTML_TEMPLATE = """
         <div class="table-wrapper">
             <table id="matchTable">
                 <thead>
-                    <tr>
-                        <th>일시</th>
-                        <th>리그</th>
-                        <th>홈</th>
-                        <th>승 배당</th>
-                        <th>무 배당</th>
-                        <th>패 배당</th>
-                        <th>원정</th>
-                        <th>정배당</th>
-                        <th>기대확률</th>
-                        <th>분석</th>
-                        <th>승점차</th>
-                        <th>최근5</th>
-                        <th>상대전적</th>
-                    </tr>
+                    <tr id="matchHead"></tr>
                 </thead>
                 <tbody id="matchBody">
                     <tr>
@@ -655,20 +644,47 @@ HTML_TEMPLATE = """
         }
 
         function form5Cell(m) {
-            const parts = [];
+            const lines = [];
             const add = (side, pts, form, hotClass) => {
                 if (pts == null && !form) return;
                 const hot = Number(pts) >= 9;
-                if (hot) {
-                    parts.push(`<span class="h2h-streak ${hotClass}">✓ ${side} ${pts}점</span>`);
-                } else if (pts != null) {
-                    parts.push(`<span class="h2h-none">${side} ${pts}점</span>`);
-                }
-                if (form) parts.push(`<div class="h2h-form">${escapeHtml(form)}</div>`);
+                const label = hot
+                    ? `<span class="h2h-streak ${hotClass}">✓ ${side} ${pts}점</span>`
+                    : (pts != null ? `<span class="h2h-none">${side} ${pts}점</span>` : '');
+                const marks = form
+                    ? `<span class="form5-marks">${escapeHtml(form)}</span>`
+                    : '';
+                lines.push(`<div class="form5-line">${label}${marks}</div>`);
             };
             add('홈', m.form5_home_pts, m.form5_home, 'h2h-home');
             add('원정', m.form5_away_pts, m.form5_away, 'h2h-away');
-            return parts.join('') || '<span class="h2h-none">-</span>';
+            return lines.length ? `<div class="form5-lines">${lines.join('')}</div>` : '<span class="h2h-none">-</span>';
+        }
+
+        function isForm5View() {
+            return currentLeague === 'form5';
+        }
+
+        function tableColspan() {
+            return isForm5View() ? 10 : 13;
+        }
+
+        function renderHead() {
+            const extra = isForm5View()
+                ? ''
+                : '<th>기대확률</th><th>분석</th><th>승점차</th>';
+            document.getElementById('matchHead').innerHTML = `
+                <th>일시</th>
+                <th>리그</th>
+                <th>홈</th>
+                <th>승 배당</th>
+                <th>무 배당</th>
+                <th>패 배당</th>
+                <th>원정</th>
+                <th>정배당</th>
+                ${extra}
+                <th>최근5</th>
+                <th>상대전적</th>`;
         }
 
         function rowHotClass(m) {
@@ -726,12 +742,22 @@ HTML_TEMPLATE = """
 
         function matchCard(m) {
             const hot = rowHotClass(m);
+            const slim = isForm5View();
+            const signal = slim ? '' : `<span class="signal-badge ${escapeHtml(m.signal_class)}">${escapeHtml(m.signal)}</span>`;
+            const extraMeta = slim ? form5Cell(m) : `${ptsCell(m)}${form5Cell(m)}${h2hCell(m)}`;
+            const vote = slim ? '' : `
+                    <div class="vote-text">승${m.w_pct}% 무${m.d_pct}% 패${m.l_pct}%</div>
+                    <div class="vote-bar">
+                        <div class="vote-w" style="width:${m.w_pct}%"></div>
+                        <div class="vote-d" style="width:${m.d_pct}%"></div>
+                        <div class="vote-l" style="width:${m.l_pct}%"></div>
+                    </div>`;
             return `
                 <article class="match-card ${hot}">
                     <div class="card-top">
                         <span class="date">${escapeHtml(m.date)}</span>
                         <span class="league-badge ${leagueClass(m.league)}">${escapeHtml(m.league)}</span>
-                        <span class="signal-badge ${escapeHtml(m.signal_class)}">${escapeHtml(m.signal)}</span>
+                        ${signal}
                     </div>
                     <div class="card-teams">
                         <div>
@@ -749,22 +775,17 @@ HTML_TEMPLATE = """
                     </div>
                     <div class="card-meta">
                         <span class="fav-badge ${favClass(m.fav_side)}">${escapeHtml(m.fav_team)}</span>
-                        ${ptsCell(m)}
-                        ${form5Cell(m)}
-                        ${h2hCell(m)}
+                        ${extraMeta}
+                        ${slim ? h2hCell(m) : ''}
                     </div>
-                    <div class="vote-text">승${m.w_pct}% 무${m.d_pct}% 패${m.l_pct}%</div>
-                    <div class="vote-bar">
-                        <div class="vote-w" style="width:${m.w_pct}%"></div>
-                        <div class="vote-d" style="width:${m.d_pct}%"></div>
-                        <div class="vote-l" style="width:${m.l_pct}%"></div>
-                    </div>
+                    ${vote}
                 </article>`;
         }
 
         function setStatus(html) {
+            renderHead();
             document.getElementById('matchBody').innerHTML =
-                `<tr><td colspan="13">${html}</td></tr>`;
+                `<tr><td colspan="${tableColspan()}">${html}</td></tr>`;
             document.getElementById('matchCards').innerHTML = html;
         }
 
@@ -812,6 +833,7 @@ HTML_TEMPLATE = """
             } else {
                 rows = sortByKickoff(rows);
             }
+            renderHead();
             if (!rows.length) {
                 const emptyMsg = currentLeague === 'pts'
                     ? '같은 승점차의 평균 배당 대비 편차가 큰 경기가 없습니다.'
@@ -825,6 +847,7 @@ HTML_TEMPLATE = """
                     </div>`);
                 return;
             }
+            const slim = isForm5View();
             body.innerHTML = rows.map(m => `
                 <tr data-league="${escapeHtml(m.league)}" class="${rowHotClass(m)}">
                     <td style="color:#888;">${escapeHtml(m.date)}</td>
@@ -835,6 +858,7 @@ HTML_TEMPLATE = """
                     <td class="odds odds-lose ${m.fav_side === '원정' ? 'odds-lowest' : ''}">${m.lose_allot}</td>
                     <td class="team-name">${escapeHtml(m.away)}</td>
                     <td><span class="fav-badge ${favClass(m.fav_side)}">${escapeHtml(m.fav_team)}</span></td>
+                    ${slim ? '' : `
                     <td>
                         <div class="vote-text">승${m.w_pct}% 무${m.d_pct}% 패${m.l_pct}%</div>
                         <div class="vote-bar">
@@ -844,7 +868,7 @@ HTML_TEMPLATE = """
                         </div>
                     </td>
                     <td><span class="signal-badge ${escapeHtml(m.signal_class)}">${escapeHtml(m.signal)}</span></td>
-                    <td>${ptsCell(m)}</td>
+                    <td>${ptsCell(m)}</td>`}
                     <td>${form5Cell(m)}</td>
                     <td>${h2hCell(m)}</td>
                 </tr>
@@ -950,6 +974,7 @@ HTML_TEMPLATE = """
             renderRows();
         });
 
+        renderHead();
         loadData(false);
     </script>
 </body>
